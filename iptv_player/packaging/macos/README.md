@@ -51,31 +51,46 @@ Actions: Apple Silicon e Intel.
 
 Também é executado automaticamente quando é criada uma tag começada por `v`.
 
+## Escolher a versão correta
+
+- Macs com processador Apple M1/M2/M3/M4/M5: `Apple-Silicon` (`arm64`)
+- Macs com processador Intel: `Intel` (`x86_64`)
+
+Em **menu Apple > Acerca deste Mac**, confirma se aparece "Chip" (Apple
+Silicon) ou "Processador" (Intel). O VLC instalado também tem de ter a mesma
+arquitetura.
+
 ## Primeira execução no Mac
 
-O Gatekeeper vai bloquear a app porque não está assinada com Apple Developer ID:
+Sem uma assinatura Apple Developer ID e notarização configuradas, o Gatekeeper
+pode bloquear a app:
 
-1. **Botão direito** no `IPTV Player.app` → **Abrir** → **Abrir mesmo assim**
-2. Na primeira execução pode demorar mais (PyInstaller extrai binários)
+1. Tenta abrir o `IPTV Player.app` uma vez.
+2. Abre **Definições do Sistema > Privacidade e Segurança**.
+3. Na secção **Segurança**, seleciona **Abrir mesmo assim** e confirma.
 
-Para distribuir a terceiros sem o aviso do Gatekeeper, precisas de:
+Não uses esse desbloqueio para uma app obtida de uma origem que não seja de
+confiança. O botão fica disponível por cerca de uma hora depois da tentativa.
+
+Para distribuir a terceiros sem o aviso do Gatekeeper, guarda primeiro as
+credenciais no Keychain e deixa o script assinar, notarizar e validar tudo:
 ```bash
-# 1. Código de equipa Apple Developer (https://developer.apple.com)
-# 2. Assinar o bundle
-codesign --deep --force --verify --verbose \
-    --sign "Developer ID Application: O TEU NOME (TEAM_ID)" \
-    "dist/IPTV Player.app"
-
-# 3. Enviar para notarização
-ditto -c -k --keepParent "dist/IPTV Player.app" "dist/IPTV Player.zip"
-xcrun notarytool submit "dist/IPTV Player.zip" \
+xcrun notarytool store-credentials "iptv-player-notary" \
     --apple-id "teu@email.com" \
     --team-id "TEAM_ID" \
-    --password "@keychain:AC_PASSWORD"
+    --password "PALAVRA_PASSE_ESPECIFICA_DA_APP"
 
-# 4. Carimbar (stapling)
-xcrun stapler staple "dist/IPTV Player.app"
+MACOS_CODESIGN_IDENTITY="Developer ID Application: O TEU NOME (TEAM_ID)" \
+MACOS_NOTARY_PROFILE="iptv-player-notary" \
+bash packaging/macos/build.sh
 ```
+
+Sem estas variáveis, o script aplica uma assinatura ad-hoc válida e verifica a
+integridade do bundle e do DMG. Essa assinatura evita bundles corrompidos, mas
+não substitui a notarização da Apple.
+
+O entitlement incluído desativa apenas a validação de bibliotecas de terceiros,
+necessária porque a app carrega `libvlc` a partir do VLC instalado separadamente.
 
 ## Ícone personalizado
 
@@ -124,6 +139,14 @@ Os logs da app ficam em:
 ~/.config/iptv-player/logs/iptv_player.log
 ```
 
+Para distinguir bloqueio do Gatekeeper de um crash da aplicação:
+
+```bash
+codesign --verify --deep --strict --verbose=2 "/Applications/IPTV Player.app"
+file "/Applications/IPTV Player.app/Contents/MacOS/IPTV Player"
+open ~/.config/iptv-player/logs/iptv_player.log
+```
+
 ### Build falha — voltar a tentar do zero
 
 ```bash
@@ -136,6 +159,7 @@ bash packaging/macos/build.sh
 ```
 packaging/macos/
 ├── build.sh                  # Script de build principal
+├── entitlements.plist        # Permite carregar o libvlc externo com hardened runtime
 ├── iptv_player.spec          # Configuração PyInstaller
 ├── generate_icon.py          # Gera ícone .icns (Pillow + iconutil)
 ├── runtime_hook_keyring.py   # Força backend macOS Keychain
