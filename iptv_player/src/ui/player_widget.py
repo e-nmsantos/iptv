@@ -274,12 +274,20 @@ class PlayerWidget(QWidget):
     def _show_subtitle_menu(self):
         menu = QMenu(self)
         tracks = self._media_player.get_subtitle_tracks()
+        selected_track = self._media_player.get_subtitle_track()
         disable = menu.addAction("Desativar")
+        disable.setCheckable(True)
+        disable.setChecked(selected_track < 0)
         disable.triggered.connect(lambda: self._media_player.set_subtitle_track(-1))
         if tracks:
             menu.addSeparator()
         for track_id, label in tracks:
-            menu.addAction(label, lambda checked=False, value=track_id: self._media_player.set_subtitle_track(value))
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(track_id == selected_track)
+            action.triggered.connect(
+                lambda checked=False, value=track_id: self._media_player.set_subtitle_track(value)
+            )
         menu.addSeparator()
         add_file = menu.addAction("Adicionar ficheiro de legendas…")
         add_file.triggered.connect(self._add_subtitle_file)

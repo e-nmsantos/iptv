@@ -1398,10 +1398,37 @@ class _FakeInstance:
 
 
 class _FakePlayer:
+    def __init__(self):
+        self.length = 120_000
+        self.time = 0
+        self.subtitle_track = -1
+        self.subtitle_selections = []
+
     def set_media(self, _media):
         pass
 
     def play(self):
+        return 0
+
+    def get_length(self):
+        return self.length
+
+    def get_time(self):
+        return self.time
+
+    def set_time(self, value):
+        self.time = value
+        return 0
+
+    def video_get_spu_description(self):
+        return [(-1, b"Disable"), (2, "Português")]
+
+    def video_get_spu(self):
+        return self.subtitle_track
+
+    def video_set_spu(self, track_id):
+        self.subtitle_selections.append(track_id)
+        self.subtitle_track = track_id
         return 0
 
 
@@ -1434,6 +1461,10 @@ class MediaPlayerTests(unittest.TestCase):
         player._retrying = False
         player._current_is_live = False
         player._buffer_size_ms = 1500
+        player._pending_seek_ms = None
+        player._seek_retry_count = 0
+        player._requested_subtitle_track = None
+        player._subtitle_retry_count = 0
         return player
 
     def test_retry_counter_is_not_reset_during_retry(self):
@@ -1461,6 +1492,28 @@ class MediaPlayerTests(unittest.TestCase):
         self.assertIn(":http-continuous", player._instance.media.options)
         self.assertIn(":network-caching=5000", player._instance.media.options)
         self.assertIn(":live-caching=5000", player._instance.media.options)
+
+    def test_vod_http_does_not_use_continuous_mode_and_seeks_by_time(self):
+        player = self._player_without_vlc()
+
+        player.play("https://example.test/series/episode.mkv", is_live=False)
+
+        self.assertNotIn(":http-continuous", player._instance.media.options)
+        self.assertNotIn(":live-caching=1500", player._instance.media.options)
+        self.assertIn(":file-caching=1500", player._instance.media.options)
+        self.assertTrue(player.seek(0.5))
+        self.assertEqual(player._player.time, 60_000)
+        self.assertEqual(player._pending_seek_ms, 60_000)
+
+    def test_subtitle_tracks_exclude_disable_and_selection_is_remembered(self):
+        player = self._player_without_vlc()
+
+        self.assertEqual(player.get_subtitle_tracks(), [(2, "Português")])
+        self.assertTrue(player.set_subtitle_track(2))
+
+        self.assertEqual(player.get_subtitle_track(), 2)
+        self.assertEqual(player._requested_subtitle_track, 2)
+        self.assertEqual(player._player.subtitle_selections, [2])
 
     def test_custom_vlc_directory_is_configured_before_instance_creation(self):
         player = MediaPlayer.__new__(MediaPlayer)
