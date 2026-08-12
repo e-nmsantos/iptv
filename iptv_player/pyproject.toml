@@ -1,6 +1,6 @@
 [project]
 name = "iptv-player"
-version = "0.5.0"
+version = "0.5.2"
 description = "Desktop IPTV player for authorized M3U, Xtream and Stalker sources"
 requires-python = ">=3.9"
 
