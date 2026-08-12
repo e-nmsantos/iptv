@@ -1487,7 +1487,7 @@ class MediaPlayerTests(unittest.TestCase):
         with patch.dict(os.environ, {"PATH": ""}), patch(
             "src.player.media_player.os.path.isfile", return_value=True
         ), patch(
-            "src.player.media_player.os.add_dll_directory", return_value=Handle()
+            "src.player.media_player.os.add_dll_directory", return_value=Handle(), create=True
         ), patch(
             "src.player.media_player.vlc.Instance", side_effect=create_instance
         ):
