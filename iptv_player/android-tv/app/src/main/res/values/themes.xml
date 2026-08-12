@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.IPTVPlayerTV" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorAccent">#41D3BD</item>
+        <item name="android:windowBackground">#07111F</item>
+    </style>
+</resources>
