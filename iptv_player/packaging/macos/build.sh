@@ -42,6 +42,21 @@ if ! "$PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 9))'; the
 fi
 echo "Python $PYVER - OK"
 
+BUILD_ARCH=$(uname -m)
+VLC_LIBRARY="/Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib"
+if [ ! -f "$VLC_LIBRARY" ]; then
+    echo "ERROR: VLC is installed, but $VLC_LIBRARY is missing."
+    exit 1
+fi
+
+if ! file "$VLC_LIBRARY" | grep -Eq "$BUILD_ARCH|universal"; then
+    echo "ERROR: The installed VLC is not compatible with this Mac ($BUILD_ARCH)."
+    file "$VLC_LIBRARY"
+    echo "Reinstall VLC on this Mac with: brew reinstall --cask vlc"
+    exit 1
+fi
+echo "Architecture $BUILD_ARCH / VLC compatible - OK"
+
 echo "=== Setting up build environment ==="
 "$PYTHON" -m venv .venv-build
 source .venv-build/bin/activate
@@ -71,6 +86,36 @@ if [ ! -d "$APP_PATH" ]; then
     exit 1
 fi
 
+APP_EXECUTABLE="$APP_PATH/Contents/MacOS/IPTV Player"
+if [ ! -f "$APP_EXECUTABLE" ]; then
+    echo "ERROR: The app executable is missing: $APP_EXECUTABLE"
+    exit 1
+fi
+chmod +x "$APP_EXECUTABLE"
+
+echo "=== Signing and validating app bundle ==="
+# PyInstaller signs Mach-O files while collecting them. Seal the final bundle
+# as well so Gatekeeper never sees a partially/invalidly signed application.
+# Use a Developer ID when supplied; otherwise produce a valid ad-hoc signature
+# suitable for local/test distribution.
+if [ -n "${MACOS_CODESIGN_IDENTITY:-}" ]; then
+    codesign --force --deep --options runtime --timestamp \
+        --entitlements "packaging/macos/entitlements.plist" \
+        --sign "$MACOS_CODESIGN_IDENTITY" "$APP_PATH"
+else
+    codesign --force --deep --sign - "$APP_PATH"
+fi
+
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+plutil -lint "$APP_PATH/Contents/Info.plist"
+file "$APP_EXECUTABLE"
+
+APP_ARCHS=$(lipo -archs "$APP_EXECUTABLE")
+if [[ " $APP_ARCHS " != *" $BUILD_ARCH "* ]]; then
+    echo "ERROR: Built executable architecture '$APP_ARCHS' does not include '$BUILD_ARCH'."
+    exit 1
+fi
+
 echo "=== Creating DMG ==="
 rm -f "$DMG_PATH" "${DMG_PATH}.sha256"
 rm -rf "$DMG_ROOT"
@@ -78,15 +123,48 @@ mkdir -p "$DMG_ROOT"
 cp -R "$APP_PATH" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
 
+cat > "$DMG_ROOT/LEIA-ME.txt" <<EOF
+IPTV Player para macOS ($BUILD_ARCH)
+
+1. Arraste "IPTV Player.app" para a pasta Applications.
+2. Instale o VLC em /Applications/VLC.app (https://www.videolan.org/vlc/).
+3. Abra o IPTV Player.
+
+Se o macOS bloquear esta versao nao notarizada:
+  Definicoes do Sistema > Privacidade e Seguranca > Seguranca > Abrir mesmo assim
+
+Escolha sempre o DMG correspondente ao processador do Mac:
+  arm64 = Apple Silicon (M1/M2/M3/M4/M5)
+  x86_64 = Intel
+EOF
+
 hdiutil create \
     -volname "IPTV Player" \
     -srcfolder "$DMG_ROOT" \
     -ov \
     -format UDZO \
-    -fs APFS \
+    -fs HFS+ \
     "$DMG_PATH"
 
 rm -rf "$DMG_ROOT"
+
+if [ -n "${MACOS_CODESIGN_IDENTITY:-}" ]; then
+    codesign --force --timestamp --sign "$MACOS_CODESIGN_IDENTITY" "$DMG_PATH"
+fi
+
+if [ -n "${MACOS_NOTARY_PROFILE:-}" ]; then
+    if [ -z "${MACOS_CODESIGN_IDENTITY:-}" ]; then
+        echo "ERROR: MACOS_NOTARY_PROFILE requires MACOS_CODESIGN_IDENTITY."
+        exit 1
+    fi
+    echo "=== Notarizing DMG ==="
+    xcrun notarytool submit "$DMG_PATH" \
+        --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG_PATH"
+    xcrun stapler validate "$DMG_PATH"
+fi
+
+hdiutil verify "$DMG_PATH"
 shasum -a 256 "$DMG_PATH" > "${DMG_PATH}.sha256"
 
 APP_SIZE_MB=$(du -sm "$APP_PATH" | cut -f1)
