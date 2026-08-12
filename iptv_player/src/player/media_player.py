@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 _LIVE_BUFFER_WATCHDOG_TICKS = 16     # ~8s of continuous VLC buffering -> retry
 _LIVE_STALL_WATCHDOG_TICKS = 20      # ~10s of frozen picture while "Playing" -> retry
 _STABLE_RESET_TICKS = 30             # ~15s of stable playback -> restore retry budget
+_SEEK_TOLERANCE_MS = 2500
+_MAX_SEEK_RETRIES = 6
+_MAX_SUBTITLE_RETRIES = 6
 
 
 class MediaPlayer(QObject):
@@ -71,6 +74,10 @@ class MediaPlayer(QObject):
         self._is_recording = False
         self._recording_path = ""
         self._buffering_events = 0
+        self._pending_seek_ms: Optional[int] = None
+        self._seek_retry_count = 0
+        self._requested_subtitle_track: Optional[int] = None
+        self._subtitle_retry_count = 0
 
         # Auto-detect VLC installation path
         if not vlc_path:
@@ -202,6 +209,10 @@ class MediaPlayer(QObject):
                 self._stall_ticks = 0
                 self._current_headers = dict(custom_headers or {})
                 self._current_is_live = bool(is_live)
+                self._pending_seek_ms = None
+                self._seek_retry_count = 0
+                self._requested_subtitle_track = None
+                self._subtitle_retry_count = 0
 
             # Create media with custom headers if needed
             try:
@@ -220,12 +231,13 @@ class MediaPlayer(QObject):
 
                 if url.lower().startswith(("http://", "https://")):
                     cache_ms = self._effective_cache_ms()
-                    options.extend([
-                        ":http-reconnect",
-                        ":http-continuous",
-                        f":network-caching={cache_ms}",
-                        f":live-caching={cache_ms}",
-                    ])
+                    options.extend([":http-reconnect", f":network-caching={cache_ms}"])
+                    if self._current_is_live:
+                        # Continuous mode is appropriate for endless broadcasts,
+                        # but prevents reliable HTTP range seeking in VOD/episodes.
+                        options.extend([":http-continuous", f":live-caching={cache_ms}"])
+                    else:
+                        options.append(f":file-caching={cache_ms}")
 
                 if extra_sout:
                     options.append(extra_sout)
@@ -380,20 +392,43 @@ class MediaPlayer(QObject):
                 return 0
         return 0
 
-    def seek(self, position: float):
-        """Seek to a position (0.0 to 1.0)."""
-        if self._player:
-            self._player.set_position(position)
+    def seek(self, position: float) -> bool:
+        """Seek to a fraction of a finite item using an absolute timestamp.
 
-    def seek_relative(self, seconds: int):
+        VLC's ``set_position`` is unreliable for HTTP VOD and may reopen the
+        input at byte zero. Converting the fraction to milliseconds preserves
+        normal HTTP range requests and also lets us verify that VLC applied it.
+        """
+        length = self.get_length()
+        if not self._player or length <= 0 or self._current_is_live:
+            return False
+        fraction = max(0.0, min(1.0, float(position)))
+        return self.set_time(round(length * fraction))
+
+    def seek_relative(self, seconds: int) -> bool:
         """Seek relative to current position."""
-        if self._player:
-            current_time = self._player.get_time()
-            self._player.set_time(max(0, current_time + (seconds * 1000)))
+        if not self._player or self._current_is_live:
+            return False
+        current_time = max(0, int(self._player.get_time()))
+        return self.set_time(current_time + (seconds * 1000))
 
-    def set_time(self, time_ms: int):
-        if self._player:
-            self._player.set_time(max(0, int(time_ms)))
+    def set_time(self, time_ms: int) -> bool:
+        if not self._player or self._current_is_live:
+            return False
+        length = self.get_length()
+        target = max(0, int(time_ms))
+        if length > 0:
+            target = min(target, max(0, length - 500))
+        self._pending_seek_ms = target
+        self._seek_retry_count = 0
+        return self._apply_pending_seek()
+
+    def _apply_pending_seek(self) -> bool:
+        if not self._player or self._pending_seek_ms is None:
+            return False
+        result = self._player.set_time(self._pending_seek_ms)
+        self._seek_retry_count += 1
+        return result in (None, 0)
 
     @staticmethod
     def _track_descriptions(raw_tracks) -> list[tuple[int, str]]:
@@ -415,16 +450,47 @@ class MediaPlayer(QObject):
     def get_subtitle_tracks(self) -> list[tuple[int, str]]:
         if not self._player:
             return []
-        return self._track_descriptions(self._player.video_get_spu_description())
+        # VLC exposes its synthetic "Disable" entry as track -1. The UI has a
+        # dedicated action for it, so only return actual subtitle tracks here.
+        return [
+            track for track in self._track_descriptions(
+                self._player.video_get_spu_description()
+            ) if track[0] >= 0
+        ]
+
+    def get_subtitle_track(self) -> int:
+        if not self._player:
+            return -1
+        try:
+            return int(self._player.video_get_spu())
+        except Exception:
+            return -1
 
     def set_subtitle_track(self, track_id: int) -> bool:
-        return bool(self._player and self._player.video_set_spu(int(track_id)) == 0)
+        if not self._player:
+            return False
+        self._requested_subtitle_track = int(track_id)
+        self._subtitle_retry_count = 0
+        return self._apply_requested_subtitle()
+
+    def _apply_requested_subtitle(self) -> bool:
+        if not self._player or self._requested_subtitle_track is None:
+            return False
+        result = self._player.video_set_spu(self._requested_subtitle_track)
+        self._subtitle_retry_count += 1
+        return result in (None, 0)
 
     def add_subtitle_file(self, file_path: str) -> bool:
         if not self._player:
             return False
         uri = Path(file_path).resolve().as_uri()
-        return self._player.add_slave(vlc.MediaSlaveType.subtitle, uri, True) == 0
+        added = self._player.add_slave(vlc.MediaSlaveType.subtitle, uri, True) == 0
+        if added:
+            # ``b_select=True`` asks VLC to activate the new slave. Do not let a
+            # previously requested embedded track override it on the next poll.
+            self._requested_subtitle_track = None
+            self._subtitle_retry_count = 0
+        return added
 
     @property
     def is_playing(self) -> bool:
@@ -482,6 +548,28 @@ class MediaPlayer(QObject):
         length = self._player.get_length()
         position = self._player.get_position()
         current_time = self._player.get_time()
+
+        if self._pending_seek_ms is not None and current_time >= 0:
+            if abs(current_time - self._pending_seek_ms) <= _SEEK_TOLERANCE_MS:
+                self._pending_seek_ms = None
+                self._seek_retry_count = 0
+            elif (
+                state in (vlc.State.Playing, vlc.State.Paused)
+                and self._seek_retry_count < _MAX_SEEK_RETRIES
+            ):
+                self._apply_pending_seek()
+
+        if (
+            self._requested_subtitle_track is not None
+            and state == vlc.State.Playing
+        ):
+            selected = self.get_subtitle_track()
+            if selected == self._requested_subtitle_track:
+                self._subtitle_retry_count = 0
+            elif self._subtitle_retry_count < _MAX_SUBTITLE_RETRIES:
+                # VLC can recreate SPU tracks while the decoder starts. Reapply
+                # the user's selection until the active track confirms it.
+                self._apply_requested_subtitle()
 
         if length > 0:
             self.length_changed.emit(length)
@@ -553,6 +641,16 @@ class MediaPlayer(QObject):
 
         if getattr(self, "_retry_scheduled", False):
             return
+
+        if (
+            not self._current_is_live
+            and self._player
+            and getattr(self, "_pending_seek_ms", None) is None
+        ):
+            current_time = max(0, int(self._player.get_time()))
+            if current_time >= 10_000:
+                self._pending_seek_ms = current_time
+                self._seek_retry_count = 0
 
         max_retries = 12 if self._current_is_live else self._max_retries
         if self._retry_count < max_retries and self._current_url:
