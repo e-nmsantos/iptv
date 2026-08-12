@@ -143,6 +143,7 @@ app = BUNDLE(
         "CFBundleExecutable": "IPTV Player",
         "CFBundlePackageType": "APPL",
         "CFBundleInfoDictionaryVersion": "6.0",
+        "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
         "NSHumanReadableCopyright": "IPTV Player © 2025",
         "LSApplicationCategoryType": "public.app-category.entertainment",
