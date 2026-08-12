@@ -1,0 +1,46 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest
+      - run: python -m ruff check src tests benchmarks
+      - run: python -m PyInstaller --noconfirm --clean packaging\windows\iptv_player.spec
+      - run: choco install innosetup --yes --no-progress
+      - shell: pwsh
+        run: .\packaging\windows\release.ps1 -SkipBuild
+      - uses: actions/attest@v4
+        if: github.event.repository.visibility == 'public'
+        with:
+          subject-checksums: release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: IPTVPlayer-Windows
+          path: release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

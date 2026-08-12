@@ -1,0 +1,30 @@
+# IPTV Player - Dependências
+# Instalação: pip install -r requirements.txt
+
+# Interface gráfica
+PySide6>=6.6.0
+
+# Reprodução de vídeo (VLC)
+python-vlc>=3.0.18122
+
+# HTTP requests
+requests>=2.31.0
+aiohttp>=3.9.0
+
+# Processamento XML (EPG XMLTV)
+lxml>=4.9.0
+
+# Parsing M3U
+m3u8>=3.5.0
+
+# Async utilities
+aiofiles>=23.2.0
+
+# Criptografia (para Stalker Portal)
+pycryptodome>=3.20.0
+
+# Armazenamento seguro da chave de cifra no gestor de credenciais do sistema
+keyring>=25.0.0
+
+# Validação de URLs
+validators>=0.22.0

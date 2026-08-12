@@ -1,0 +1,62 @@
+name: Build macOS DMG
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: Apple-Silicon
+            runner: macos-15
+          - arch: Intel
+            runner: macos-15-intel
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install VLC
+        run: brew install --cask vlc
+
+      - name: Run tests
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest discover -s tests -v
+
+      - name: Build app and DMG
+        run: bash packaging/macos/build.sh
+
+      - name: Name package for architecture
+        run: |
+          mv "dist/IPTV Player.dmg" "dist/IPTV-Player-${{ matrix.arch }}.dmg"
+          shasum -a 256 "dist/IPTV-Player-${{ matrix.arch }}.dmg" \
+            > "dist/IPTV-Player-${{ matrix.arch }}.dmg.sha256"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: IPTV-Player-${{ matrix.arch }}
+          path: |
+            dist/IPTV-Player-${{ matrix.arch }}.dmg
+            dist/IPTV-Player-${{ matrix.arch }}.dmg.sha256
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Catalog sources and credentials are device-local and must never enter backups. -->
+    <exclude domain="root" path="." />
+</full-backup-content>

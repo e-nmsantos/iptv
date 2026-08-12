@@ -1,0 +1,15 @@
+.venv/
+.claude/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.coverage
+**/build/
+**/dist/
+**/.gradle/
+**/.kotlin/
+**/local.properties
+iptv_player/release/
+iptv_player/packaging/macos/iconset/
+iptv_player/packaging/macos/icon.icns
+iptv_player/.venv-build/
