@@ -45,6 +45,15 @@ jobs:
       - name: Build app and DMG
         run: bash packaging/macos/build.sh
 
+      - name: Smoke-test packaged app
+        env:
+          QT_QPA_PLATFORM: offscreen
+          IPTV_PLAYER_SMOKE_TEST: "1"
+        run: |
+          set -o pipefail
+          "dist/IPTV Player.app/Contents/MacOS/IPTV Player" 2>&1 | tee macos-smoke-test.log
+          grep -q "IPTV Player started successfully" macos-smoke-test.log
+
       - name: Name package for architecture
         run: |
           mv "dist/IPTV Player.dmg" "dist/IPTV-Player-${{ matrix.arch }}.dmg"
