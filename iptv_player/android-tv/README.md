@@ -3,6 +3,8 @@
 Cliente Android TV nativo do IPTV Player. Este projeto é independente da
 aplicação desktop e usa Kotlin, Compose for TV e AndroidX Media3.
 
+O histórico de versões está no ficheiro [`CHANGELOG.md`](CHANGELOG.md).
+
 ## MVP atual
 
 - importação M3U/M3U8 por URL HTTP(S) ou ficheiro;
@@ -20,7 +22,7 @@ aplicação desktop e usa Kotlin, Compose for TV e AndroidX Media3.
 - navegação lateral própria para comando, com Live, Filmes, Séries e pesquisa;
 - canais compactos e posters dedicados para VOD/Séries;
 - logos e capas remotas com cache local;
-- diagnóstico e repetição quando um stream falha no player.
+- diagnóstico e repetição quando um stream falha no player;
 - guia lateral dentro do player, vídeo e canais lado a lado, com zapping por comando;
 - EPG XMLTV incremental com o programa atual apresentado no catálogo;
 - favoritos persistentes (botão vermelho do comando durante a reprodução);
@@ -32,20 +34,6 @@ catálogo local sem voltar a contactar o servidor; **Atualizar** é a ação que
 descarrega a versão mais recente. As consultas independentes de Xtream Codes
 são executadas em paralelo e a chave do Android Keystore é reutilizada durante
 a sessão para acelerar catálogos grandes.
-
-Na versão 0.12, listas M3U são lidas progressivamente e persistidas em lotes de
-500 itens. As atualizações comparam hashes de conteúdo, mantêm IDs e favoritos,
-não voltam a cifrar linhas inalteradas e removem apenas conteúdos que deixaram
-de existir. Um DAO Room paginado e o respetivo adaptador Flow fornecem as
-leituras de produção sobre o esquema SQLite v6. As escritas incrementais
-continuam no importador SQLite diferencial e notificam explicitamente o Room;
-a migração dessas escritas para DAO Room é trabalho de consolidação.
-
-Desde a versão 0.6, **Listas** e **Adicionar** são áreas completas da aplicação,
-em vez de janelas sobre o catálogo. O arranque lê primeiro o índice das listas e
-os metadados dos conteúdos; URLs e cabeçalhos protegidos só são decifrados ao
-abrir um canal, filme ou série. As operações SQLite são serializadas para evitar
-conflitos `database is locked` durante importações e atualizações.
 
 No player, **OK**, seta esquerda, `Guide` ou `Menu` abre a lista lateral. A seta
 direita ou `Back` fecha-a; com o guia fechado, cima/baixo e Channel+/Channel−

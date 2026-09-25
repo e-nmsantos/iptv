@@ -23,6 +23,9 @@ from .channel_list import ChannelListWidget
 from .poster_delegate import IMAGE_URL_ROLE, PosterCardDelegate
 from .theme import Palette
 
+_SXXEXX_RE = re.compile(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b")
+_NXN_RE = re.compile(r"(?i)\b(\d{1,2})x(\d{1,3})\b")
+
 
 class SeriesBrowserWidget(QWidget):
     """
@@ -145,15 +148,15 @@ class SeriesBrowserWidget(QWidget):
 
     @staticmethod
     def _parse_m3u_episode(channel):
-        patterns = (
-            r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b",
-            r"(?i)\b(\d{1,2})x(\d{1,3})\b",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, channel.name)
-            if match:
-                title = re.sub(pattern, "", channel.name).strip(" -._|[]()")
-                return title or channel.group, int(match.group(1)), int(match.group(2))
+        name = channel.name
+        match = _SXXEXX_RE.search(name)
+        if match:
+            title = _SXXEXX_RE.sub("", name).strip(" -._|[]()")
+            return title or channel.group, int(match.group(1)), int(match.group(2))
+        match = _NXN_RE.search(name)
+        if match:
+            title = _NXN_RE.sub("", name).strip(" -._|[]()")
+            return title or channel.group, int(match.group(1)), int(match.group(2))
         return None
 
     def toggle_favorite(self, channel_id: int, is_favorite: bool):

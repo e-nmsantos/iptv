@@ -16,15 +16,18 @@ jobs:
     runs-on: windows-latest
     env:
       QT_QPA_PLATFORM: offscreen
+    defaults:
+      run:
+        working-directory: iptv_player
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+            iptv_player/requirements.txt
+            iptv_player/requirements-dev.txt
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest
@@ -36,11 +39,11 @@ jobs:
       - uses: actions/attest@v4
         if: github.event.repository.visibility == 'public'
         with:
-          subject-checksums: release/SHA256SUMS.txt
-      - uses: actions/upload-artifact@v7
+          subject-checksums: iptv_player/release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
         with:
           name: IPTVPlayer-Windows
-          path: release/*
+          path: iptv_player/release/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 30

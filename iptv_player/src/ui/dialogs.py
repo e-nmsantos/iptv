@@ -1,6 +1,8 @@
 """Dialog windows for the IPTV Player application."""
 
-from PySide6.QtCore import Qt
+from typing import Optional
+
+from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -12,9 +14,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -99,9 +104,24 @@ class PlaylistDialog(QDialog):
         buttons = QDialogButtonBox()
         self._import_btn = buttons.addButton("Importar", QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _validate_and_accept(self):
+        if not self.playlist_path and not self.playlist_url:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica um URL ou seleciona um ficheiro."
+            )
+            self._url_input.setFocus()
+            return
+        if not self.playlist_name:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica um nome para a playlist."
+            )
+            self._name_input.setFocus()
+            return
+        self.accept()
 
     def _browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -195,7 +215,7 @@ class XtreamDialog(QDialog):
         buttons = QDialogButtonBox()
         self._login_btn = buttons.addButton("Ligar", QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._accept_if_transport_confirmed)
+        buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -214,6 +234,33 @@ class XtreamDialog(QDialog):
     @property
     def playlist_name(self) -> str:
         return self._name_input.text().strip()
+
+    def _validate_and_accept(self):
+        if not self.playlist_name:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica um nome para a playlist."
+            )
+            self._name_input.setFocus()
+            return
+        if not self.server_url:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica o endereço do servidor Xtream."
+            )
+            self._server_input.setFocus()
+            return
+        if not self.username:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica o nome de utilizador."
+            )
+            self._username_input.setFocus()
+            return
+        if not self.password:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica a palavra-passe."
+            )
+            self._password_input.setFocus()
+            return
+        self._accept_if_transport_confirmed()
 
     def _accept_if_transport_confirmed(self):
         if self.server_url.lower().startswith("http://"):
@@ -282,7 +329,7 @@ class StalkerDialog(QDialog):
         buttons = QDialogButtonBox()
         self._login_btn = buttons.addButton("Ligar", QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._accept_if_transport_confirmed)
+        buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -293,6 +340,31 @@ class StalkerDialog(QDialog):
     @property
     def mac_address(self) -> str:
         return self._mac_input.text().strip()
+
+    @property
+    def playlist_name(self) -> str:
+        return self._name_input.text().strip()
+
+    def _validate_and_accept(self):
+        if not self.playlist_name:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica um nome para a playlist."
+            )
+            self._name_input.setFocus()
+            return
+        if not self.portal_url:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica o URL do portal Stalker."
+            )
+            self._portal_input.setFocus()
+            return
+        if not self.mac_address:
+            QMessageBox.warning(
+                self, "Aviso", "Por favor, indica o endereço MAC."
+            )
+            self._mac_input.setFocus()
+            return
+        self._accept_if_transport_confirmed()
 
     def _accept_if_transport_confirmed(self):
         # Stalker addresses without an explicit scheme are normalized to HTTP.
@@ -309,10 +381,6 @@ class StalkerDialog(QDialog):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.accept()
-
-    @property
-    def playlist_name(self) -> str:
-        return self._name_input.text().strip()
 
 
 class SettingsDialog(QDialog):
@@ -543,7 +611,6 @@ class LoadingDialog(QDialog):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)  # Indeterminate
         layout.addWidget(self.progress_bar)
-
         self._cancel_btn = QPushButton("Cancelar")
         self._cancel_btn.clicked.connect(self.reject)
         layout.addWidget(self._cancel_btn)
@@ -552,3 +619,480 @@ class LoadingDialog(QDialog):
         """Set determinate progress."""
         self.progress_bar.setRange(0, maximum)
         self.progress_bar.setValue(value)
+
+
+class SubtitleSearchWorker(QThread):
+    """Background worker thread to search subtitles without freezing the UI."""
+    finished_search = Signal(list)
+
+    def __init__(
+        self,
+        finder,
+        query: str = "",
+        languages: str = "pt,pob,en",
+        year: Optional[int] = None,
+        season: Optional[int] = None,
+        episode: Optional[int] = None,
+        imdb_id: Optional[str] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.finder = finder
+        self.query = query
+        self.languages = languages
+        self.year = year
+        self.season = season
+        self.episode = episode
+        self.imdb_id = imdb_id
+
+    def run(self):
+        try:
+            results = self.finder.search_subtitles(
+                query=self.query,
+                languages=self.languages,
+                year=self.year,
+                season_number=self.season,
+                episode_number=self.episode,
+                imdb_id=self.imdb_id,
+            )
+        except Exception:
+            results = []
+        self.finished_search.emit(results)
+
+
+class SubtitleDownloadWorker(QThread):
+    """Background worker thread to download a subtitle file."""
+    finished_download = Signal(object)
+
+    def __init__(self, finder, subtitle_data, parent=None):
+        super().__init__(parent)
+        self.finder = finder
+        self.subtitle_data = subtitle_data
+
+    def run(self):
+        try:
+            saved_path = self.finder.download_subtitle_file(self.subtitle_data)
+        except Exception:
+            saved_path = None
+        self.finished_download.emit(saved_path)
+
+
+class SubtitleSearchDialog(QDialog):
+    """Dialog to search, preview, and download online subtitles from OpenSubtitles instantly."""
+
+    def __init__(self, initial_query: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Procurar Legendas Online (OpenSubtitles)")
+        self.resize(620, 520)
+        self.selected_file_path: Optional[str] = None
+        self._finder = None
+        self._search_worker: Optional[SubtitleSearchWorker] = None
+        self._dl_worker: Optional[SubtitleDownloadWorker] = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # Header info
+        header = QLabel("Pesquisa e transferência de legendas para Filmes, Séries e Canais")
+        header.setStyleSheet(f"color: {Palette.TEXT_SECONDARY}; font-size: 11px;")
+        layout.addWidget(header)
+
+        # Tabs for Search Modes
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet("""
+            QTabBar::tab {
+                padding: 6px 14px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+        """)
+
+        # Tab 1: Movie / General
+        tab_movie = QWidget()
+        form_movie = QFormLayout(tab_movie)
+        self._movie_title = QLineEdit()
+        self._movie_title.setPlaceholderText("Título do filme (ex: Gladiator II)")
+        self._movie_title.returnPressed.connect(self._start_search)
+        self._movie_year = QLineEdit()
+        self._movie_year.setPlaceholderText("Ano opcional (ex: 2024)")
+        self._movie_year.returnPressed.connect(self._start_search)
+        form_movie.addRow("Título:", self._movie_title)
+        form_movie.addRow("Ano:", self._movie_year)
+        self._tabs.addTab(tab_movie, "🎬 Filme / Geral")
+
+        # Tab 2: Series / TV Show
+        tab_series = QWidget()
+        form_series = QFormLayout(tab_series)
+        self._series_title = QLineEdit()
+        self._series_title.setPlaceholderText("Nome da série (ex: Breaking Bad)")
+        self._series_title.returnPressed.connect(self._start_search)
+        se_row = QHBoxLayout()
+        self._season_spin = QSpinBox()
+        self._season_spin.setRange(1, 99)
+        self._season_spin.setValue(1)
+        self._season_spin.setPrefix("T ")
+        self._episode_spin = QSpinBox()
+        self._episode_spin.setRange(1, 999)
+        self._episode_spin.setValue(1)
+        self._episode_spin.setPrefix("Ep ")
+        se_row.addWidget(self._season_spin)
+        se_row.addWidget(self._episode_spin)
+        form_series.addRow("Série:", self._series_title)
+        form_series.addRow("Temporada/Ep:", se_row)
+        self._tabs.addTab(tab_series, "📺 Série")
+
+        # Tab 3: IMDb ID
+        tab_imdb = QWidget()
+        form_imdb = QFormLayout(tab_imdb)
+        self._imdb_input = QLineEdit()
+        self._imdb_input.setPlaceholderText("Código IMDb (ex: tt0133093)")
+        self._imdb_input.returnPressed.connect(self._start_search)
+        form_imdb.addRow("IMDb ID:", self._imdb_input)
+        self._tabs.addTab(tab_imdb, "🆔 IMDb ID")
+
+        layout.addWidget(self._tabs)
+
+        # Languages filter row
+        lang_group = QGroupBox("Idiomas de Legendas")
+        lang_layout = QHBoxLayout(lang_group)
+        self._cb_pt = QCheckBox("Português (PT)")
+        self._cb_pt.setChecked(True)
+        self._cb_br = QCheckBox("Português (BR)")
+        self._cb_br.setChecked(True)
+        self._cb_en = QCheckBox("Inglês (EN)")
+        self._cb_en.setChecked(True)
+        self._cb_es = QCheckBox("Espanhol (ES)")
+        self._cb_es.setChecked(False)
+
+        lang_layout.addWidget(self._cb_pt)
+        lang_layout.addWidget(self._cb_br)
+        lang_layout.addWidget(self._cb_en)
+        lang_layout.addWidget(self._cb_es)
+        lang_layout.addStretch()
+
+        # Search action button in language row
+        self._search_btn = QPushButton("🔍 Procurar")
+        self._search_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Palette.ACCENT};
+                color: #FFFFFF;
+                font-weight: bold;
+                padding: 6px 16px;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: #0070E0;
+            }}
+        """)
+        self._search_btn.clicked.connect(self._start_search)
+        lang_layout.addWidget(self._search_btn)
+
+        layout.addWidget(lang_group)
+
+        # Progress bar (indeterminate while searching)
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)
+        self._progress.setFixedHeight(4)
+        self._progress.setTextVisible(False)
+        self._progress.hide()
+        layout.addWidget(self._progress)
+
+        # Results list
+        self._results_list = QListWidget()
+        self._results_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {Palette.BG_CARD};
+                border: 1px solid {Palette.BORDER};
+                border-radius: 4px;
+            }}
+            QListWidget::item {{
+                padding: 6px 8px;
+                border-bottom: 1px solid {Palette.BORDER};
+            }}
+            QListWidget::item:selected {{
+                background-color: {Palette.ACCENT};
+                color: #FFFFFF;
+            }}
+        """)
+        self._results_list.itemDoubleClicked.connect(self._download_and_apply)
+        layout.addWidget(self._results_list, 1)
+
+        # Bottom buttons
+        btn_box = QHBoxLayout()
+        self._status_label = QLabel("Ajusta o título/ano e clica em Procurar.")
+        self._status_label.setStyleSheet(f"color: {Palette.TEXT_SECONDARY}; font-size: 11px;")
+        btn_box.addWidget(self._status_label, 1)
+
+        self._apply_btn = QPushButton("Descarregar e Aplicar")
+        self._apply_btn.setEnabled(False)
+        self._apply_btn.clicked.connect(self._download_and_apply)
+        btn_box.addWidget(self._apply_btn)
+
+        local_btn = QPushButton("📂 Ficheiro Local...")
+        local_btn.setToolTip("Carregar um ficheiro .srt / .vtt guardado no computador")
+        local_btn.clicked.connect(self._pick_local_file)
+        btn_box.addWidget(local_btn)
+
+        close_btn = QPushButton("Fechar")
+        close_btn.clicked.connect(self.reject)
+        btn_box.addWidget(close_btn)
+
+        layout.addLayout(btn_box)
+
+        self._results_list.itemSelectionChanged.connect(
+            lambda: self._apply_btn.setEnabled(self._results_list.currentItem() is not None)
+        )
+
+        # Pre-fill query
+        self._prefill_query(initial_query)
+
+    def _prefill_query(self, query: str):
+        if not query:
+            return
+        import re
+
+        from ..core.channel_cleaner import ChannelCleaner
+        from ..core.metadata_enricher import MetadataEnricher
+
+        cleaned = ChannelCleaner.clean_name(query)
+        # Check if it looks like a series (e.g. S01E02 or 1x02)
+        s_match = re.search(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b", cleaned) or re.search(r"(?i)\b(\d{1,2})x(\d{1,3})\b", cleaned)
+        if s_match:
+            series_title = re.sub(r"(?i)\bS\d{1,2}\s*E\d{1,3}\b|\b\d{1,2}x\d{1,3}\b", "", cleaned).strip(" -._|[]()")
+            self._series_title.setText(series_title)
+            self._season_spin.setValue(int(s_match.group(1)))
+            self._episode_spin.setValue(int(s_match.group(2)))
+            self._tabs.setCurrentIndex(1)
+        else:
+            title, year = MetadataEnricher.extract_title_and_year(cleaned)
+            self._movie_title.setText(title)
+            if year:
+                self._movie_year.setText(str(year))
+            self._tabs.setCurrentIndex(0)
+
+    def _selected_languages(self) -> str:
+        langs = []
+        if self._cb_pt.isChecked():
+            langs.append("pt")
+        if self._cb_br.isChecked():
+            langs.append("pob")
+        if self._cb_en.isChecked():
+            langs.append("en")
+        if self._cb_es.isChecked():
+            langs.append("es")
+        return ",".join(langs) if langs else "pt,pob,en"
+
+    def _start_search(self):
+        from ..core.subtitles_finder import SubtitlesFinder
+
+        self._finder = SubtitlesFinder()
+        self._results_list.clear()
+        self._apply_btn.setEnabled(False)
+        self._status_label.setText("A pesquisar legendas online...")
+        self._search_btn.setEnabled(False)
+        self._progress.show()
+
+        tab_idx = self._tabs.currentIndex()
+        query = ""
+        year = None
+        season = None
+        episode = None
+        imdb_id = None
+        languages = self._selected_languages()
+
+        if tab_idx == 0:
+            query = self._movie_title.text().strip()
+            year_text = self._movie_year.text().strip()
+            if year_text.isdigit():
+                year = int(year_text)
+        elif tab_idx == 1:
+            query = self._series_title.text().strip()
+            season = self._season_spin.value()
+            episode = self._episode_spin.value()
+        elif tab_idx == 2:
+            imdb_id = self._imdb_input.text().strip()
+
+        # Stop existing worker if active
+        if self._search_worker and self._search_worker.isRunning():
+            self._search_worker.terminate()
+
+        self._search_worker = SubtitleSearchWorker(
+            finder=self._finder,
+            query=query,
+            languages=languages,
+            year=year,
+            season=season,
+            episode=episode,
+            imdb_id=imdb_id,
+            parent=self,
+        )
+        self._search_worker.finished_search.connect(self._on_search_completed)
+        self._search_worker.start()
+
+    @Slot(list)
+    def _on_search_completed(self, results: list):
+        self._progress.hide()
+        self._search_btn.setEnabled(True)
+        self._results_list.clear()
+
+        if not results:
+            self._status_label.setText("Nenhuma legenda encontrada. Tenta ajustar o nome ou ano.")
+            return
+
+        self._status_label.setText(f"Encontradas {len(results)} legendas.")
+        for item in results:
+            lang_code = item.language.upper()
+            tag = "PT" if lang_code in ("PT", "PT-PT") else "BR" if lang_code in ("POB", "PT-BR", "BR") else "EN" if lang_code == "EN" else "ES" if lang_code == "ES" else lang_code
+            dl_info = f" - {item.downloads_count} dls" if item.downloads_count > 0 else ""
+            list_item = QListWidgetItem(f"[{tag}]{dl_info}  {item.release_name}")
+            list_item.setData(Qt.ItemDataRole.UserRole, item)
+            self._results_list.addItem(list_item)
+
+        if self._results_list.count() > 0:
+            self._results_list.setCurrentRow(0)
+            self._results_list.setFocus()
+
+    def _download_and_apply(self):
+        current = self._results_list.currentItem()
+        if not current or not self._finder:
+            return
+        subtitle_data = current.data(Qt.ItemDataRole.UserRole)
+        if not subtitle_data:
+            return
+
+        self._status_label.setText("A descarregar ficheiro de legendas...")
+        self._progress.show()
+        self._apply_btn.setEnabled(False)
+
+        if self._dl_worker and self._dl_worker.isRunning():
+            self._dl_worker.terminate()
+
+        self._dl_worker = SubtitleDownloadWorker(
+            finder=self._finder,
+            subtitle_data=subtitle_data,
+            parent=self,
+        )
+        self._dl_worker.finished_download.connect(self._on_download_completed)
+        self._dl_worker.start()
+
+    @Slot(object)
+    def _on_download_completed(self, saved_path):
+        self._progress.hide()
+        self._apply_btn.setEnabled(True)
+        if saved_path:
+            self.selected_file_path = str(saved_path)
+            self.accept()
+        else:
+            self._status_label.setText("Erro ao descarregar a legenda.")
+
+    def _pick_local_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar Ficheiro de Legendas",
+            "",
+            "Legendas (*.srt *.vtt *.sub *.ass);;Todos os ficheiros (*.*)",
+        )
+        if file_path:
+            self.selected_file_path = file_path
+            self.accept()
+
+
+class SubtitleDelayDialog(QDialog):
+    """Interactive subtitle delay synchronization dialog with slider and live steps."""
+
+    def __init__(self, media_player, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sincronização de Legendas")
+        self.setMinimumWidth(440)
+        self._player = media_player
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        info = QLabel("Ajusta o atraso ou avanço das legendas em tempo real:")
+        info.setStyleSheet(f"color: {Palette.TEXT_SECONDARY}; font-size: 12px;")
+        layout.addWidget(info)
+
+        current_delay = self._player.get_subtitle_delay() if self._player else 0
+        self._delay_label = QLabel(self._format_delay_text(current_delay))
+        self._delay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._delay_label.setStyleSheet(f"color: {Palette.ACCENT}; font-size: 26px; font-weight: bold; margin: 4px 0;")
+        layout.addWidget(self._delay_label)
+
+        # Interactive Slider (-10s to +10s, step 50ms)
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(-10000, 10000)
+        self._slider.setSingleStep(50)
+        self._slider.setPageStep(250)
+        self._slider.setValue(current_delay)
+        self._slider.valueChanged.connect(self._on_slider_changed)
+        layout.addWidget(self._slider)
+
+        slider_labels = QHBoxLayout()
+        lbl_left = QLabel("-10 s (Mais Cedo)")
+        lbl_left.setStyleSheet(f"color: {Palette.TEXT_MUTED}; font-size: 10px;")
+        lbl_mid = QLabel("0 s")
+        lbl_mid.setStyleSheet(f"color: {Palette.TEXT_MUTED}; font-size: 10px;")
+        lbl_mid.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_right = QLabel("+10 s (Mais Tarde)")
+        lbl_right.setStyleSheet(f"color: {Palette.TEXT_MUTED}; font-size: 10px;")
+        lbl_right.setAlignment(Qt.AlignmentFlag.AlignRight)
+        slider_labels.addWidget(lbl_left)
+        slider_labels.addWidget(lbl_mid)
+        slider_labels.addWidget(lbl_right)
+        layout.addLayout(slider_labels)
+
+        # Quick step buttons row 1
+        steps_row1 = QHBoxLayout()
+        for delta in [-1000, -250, -50, 0, 50, 250, 1000]:
+            label = "Reset (0s)" if delta == 0 else f"{delta:+d}ms"
+            btn = QPushButton(label)
+            if delta == 0:
+                btn.clicked.connect(lambda: self._set_delay(0))
+            else:
+                btn.clicked.connect(lambda d=delta: self._adjust_delay(d))
+            steps_row1.addWidget(btn)
+        layout.addLayout(steps_row1)
+
+        # Large jump row
+        steps_row2 = QHBoxLayout()
+        btn_minus_5 = QPushButton("⏪ -5.0s")
+        btn_minus_5.clicked.connect(lambda: self._adjust_delay(-5000))
+        btn_plus_5 = QPushButton("⏩ +5.0s")
+        btn_plus_5.clicked.connect(lambda: self._adjust_delay(5000))
+        steps_row2.addWidget(btn_minus_5)
+        steps_row2.addWidget(btn_plus_5)
+        layout.addLayout(steps_row2)
+
+        # Keyboard shortcuts hint
+        hint = QLabel("💡 Dica: Podes usar as teclas G (adiantar) e H (atrasar) ou [ e ] durante o vídeo.")
+        hint.setStyleSheet(f"color: {Palette.TEXT_MUTED}; font-size: 11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        # Close button
+        close_btn = QPushButton("Concluído")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+    def _format_delay_text(self, ms: int) -> str:
+        sec = ms / 1000.0
+        return f"{ms:+d} ms  ({sec:+.2f} s)"
+
+    def _on_slider_changed(self, value: int):
+        self._delay_label.setText(self._format_delay_text(value))
+        if self._player:
+            self._player.set_subtitle_delay(value)
+
+    def _set_delay(self, ms: int):
+        clamped = max(-10000, min(10000, ms))
+        self._slider.blockSignals(True)
+        self._slider.setValue(clamped)
+        self._slider.blockSignals(False)
+        self._delay_label.setText(self._format_delay_text(clamped))
+        if self._player:
+            self._player.set_subtitle_delay(clamped)
+
+    def _adjust_delay(self, delta_ms: int):
+        current = self._player.get_subtitle_delay() if self._player else self._slider.value()
+        self._set_delay(current + delta_ms)

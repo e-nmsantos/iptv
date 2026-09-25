@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .channel import Channel
+from .content_types import SERIES, VOD, content_type_for_stream
 
 
 @dataclass
@@ -63,12 +64,22 @@ class Playlist:
         """Add a channel to the playlist."""
         self.channels.append(channel)
         self.total_channels = len(self.channels)
+        st = content_type_for_stream(getattr(channel, "stream_type", ""))
+        if st == VOD:
+            self.total_vod += 1
+        elif st == SERIES:
+            self.total_series += 1
         self.updated_at = datetime.now().isoformat()
 
     def remove_channel(self, channel: Channel):
         """Remove a channel from the playlist."""
         self.channels.remove(channel)
         self.total_channels = len(self.channels)
+        st = content_type_for_stream(getattr(channel, "stream_type", ""))
+        if st == VOD:
+            self.total_vod = max(0, self.total_vod - 1)
+        elif st == SERIES:
+            self.total_series = max(0, self.total_series - 1)
         self.updated_at = datetime.now().isoformat()
 
     def to_dict(self) -> dict:

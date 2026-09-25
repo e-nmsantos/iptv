@@ -14,6 +14,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.first
 import pt.iptvplayer.tv.model.Playlist
@@ -56,6 +57,10 @@ class CatalogRepository(
         database.catalogPage(playlistId, type, group, query, offset, PAGE_SIZE)
     }
 
+    // Room validates the on-disk schema like a pre-packaged database whenever it opens a file
+    // it didn't create itself (e.g. one an older app version built with the legacy SQLiteOpenHelper
+    // migration chain). If that validation ever rejects the schema, fall back to the legacy,
+    // always-available query path instead of breaking playlist loading for the user.
     fun observeCatalogPage(
         type: StreamType,
         group: String = "Todos",
@@ -63,15 +68,33 @@ class CatalogRepository(
         limit: Int = PAGE_SIZE,
     ): Flow<CatalogPage> {
         val playlistId = currentPlaylistId ?: return flowOf(CatalogPage(emptyList(), listOf("Todos"), 0, 0))
+        fun legacyPage() = database.catalogPage(playlistId, type, group, query, 0, limit)
         return flowStore?.observePage(playlistId, type, group, query, 0, limit)
-            ?: flowOf(database.catalogPage(playlistId, type, group, query, 0, limit))
+            ?.catch { emit(legacyPage()) }
+            ?: flowOf(legacyPage())
     }
 
-    fun refreshRoom() = room?.invalidationTracker?.refreshAsync()
+    /** Every LIVE channel, independent of whatever filter the main catalog browser last used. */
+    fun observeLiveGuideChannels(): Flow<CatalogPage> =
+        observeCatalogPage(StreamType.LIVE, "Todos", "", limit = Int.MAX_VALUE)
+
+    /** Every EPG programme in [fromMillis, toMillis), keyed by tvg-id, for the EPG timeline grid. */
+    fun observeEpgWindow(fromMillis: Long, toMillis: Long): Flow<Map<String, List<EpgProgram>>> {
+        val playlistId = currentPlaylistId ?: return flowOf(emptyMap())
+        fun legacyWindow() = database.epgWindow(fromMillis, toMillis)
+        return flowStore?.observeEpg(playlistId, fromMillis, toMillis)
+            ?.catch { emit(legacyWindow()) }
+            ?: flowOf(legacyWindow())
+    }
+
+    fun refreshRoom() {
+        runCatching { room?.invalidationTracker?.refreshAsync() }
+    }
 
     suspend fun favorites(): List<Channel> {
         val playlistId = currentPlaylistId ?: return emptyList()
-        return flowStore?.observeFavorites(playlistId)?.first() ?: emptyList()
+        return flowStore?.let { store -> runCatching { store.observeFavorites(playlistId).first() }.getOrNull() }
+            ?: emptyList()
     }
 
     suspend fun refreshEpg(playlist: Playlist): Map<String, List<EpgProgram>> = withContext(Dispatchers.IO) {

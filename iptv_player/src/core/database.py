@@ -48,6 +48,9 @@ class DatabaseManager:
         conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-32000")
+        conn.execute("PRAGMA mmap_size=268435456")
         conn.execute("PRAGMA foreign_keys=ON")
         # Avoid spurious "database is locked" failures when a worker writes
         # (e.g. replace_catalog) concurrently with main-thread reads/writes.
@@ -196,6 +199,12 @@ class DatabaseManager:
                     ON playlist_epg_cache(playlist_id, channel_id);
                 CREATE INDEX IF NOT EXISTS idx_channels_playlist_type
                     ON channels(playlist_id, stream_type);
+                CREATE INDEX IF NOT EXISTS idx_channels_playlist_stream
+                    ON channels(playlist_id, stream_type, id);
+                CREATE INDEX IF NOT EXISTS idx_channels_playlist_group
+                    ON channels(playlist_id, group_name);
+                CREATE INDEX IF NOT EXISTS idx_channels_playlist_favorite
+                    ON channels(playlist_id, is_favorite);
                 CREATE INDEX IF NOT EXISTS idx_channels_catalog_page
                     ON channels(playlist_id, stream_type, group_name, name, id);
                 CREATE INDEX IF NOT EXISTS idx_history_playlist_time
@@ -218,6 +227,7 @@ class DatabaseManager:
                 "has_archive": "INTEGER DEFAULT 0",
                 "archive_duration_days": "INTEGER DEFAULT 0",
                 "content_hash": "TEXT DEFAULT ''",
+                "channel_number": "INTEGER DEFAULT 0",
             }
             for column, definition in migrations.items():
                 if column not in existing_cols:
@@ -249,7 +259,19 @@ class DatabaseManager:
 
             run_migrations(conn)
 
-            migrated_sensitive_data = self._migrate_sensitive_values(conn)
+            # The legacy plaintext -> ciphertext migration scans every channel
+            # row and AES-verifies each encrypted field. Gate it behind a
+            # one-time flag so a large catalog is not re-scanned on every launch.
+            flag = conn.execute(
+                "SELECT value FROM app_metadata WHERE key = 'sensitive_encrypted'"
+            ).fetchone()
+            if not (flag and flag["value"] == "1"):
+                migrated_sensitive_data = self._migrate_sensitive_values(conn)
+                conn.execute(
+                    """INSERT INTO app_metadata(key, value)
+                       VALUES ('sensitive_encrypted', '1')
+                       ON CONFLICT(key) DO UPDATE SET value = excluded.value"""
+                )
 
         if migrated_sensitive_data:
             self._schedule_plaintext_purge()
@@ -419,8 +441,8 @@ class DatabaseManager:
                 epg_channel_id, stream_type, source, xtream_id, category_id,
                 user_agent, referer, custom_headers, quality, extension,
                 container_extension, country_code, provider_group, is_favorite,
-                has_archive, archive_duration_days, content_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                has_archive, archive_duration_days, content_hash, channel_number)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     playlist_id, channel.name, self._secrets.encrypt(channel.url),
@@ -434,6 +456,7 @@ class DatabaseManager:
                     int(channel.is_favorite),
                     int(channel.has_archive), channel.archive_duration_days,
                     self._channel_hash(channel),
+                    int(channel.channel_number or 0),
                 )
                 for channel in channels
             ],
@@ -447,6 +470,23 @@ class DatabaseManager:
         """Get full connection details for a single playlist (needed to
         reconstruct an authenticated parser for lazy VOD/series calls)."""
         return self.playlists.get(playlist_id)
+
+    def get_metadata_flag(self, key: str) -> bool:
+        """Read a boolean flag from ``app_metadata`` (gates one-time migrations)."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_metadata WHERE key = ?", (key,)
+            ).fetchone()
+        return bool(row and row["value"] == "1")
+
+    def set_metadata_flag(self, key: str) -> None:
+        """Set a boolean flag in ``app_metadata``."""
+        with self._connection() as conn:
+            conn.execute(
+                """INSERT INTO app_metadata(key, value) VALUES (?, '1')
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (key,),
+            )
 
     def export_backup_data(self) -> dict:
         return build_backup_data(self)
@@ -525,12 +565,18 @@ class DatabaseManager:
                 row[column] = self._secrets.decrypt(row[column] or "")
         return row
 
-    def _row_to_channel(self, row) -> Channel:
-        """Build a Channel from a `channels` table row."""
+    def _row_to_channel(self, row, decrypt_urls: bool = True) -> Channel:
+        """Build a Channel from a `channels` table row.
+
+        ``decrypt_urls=False`` skips the expensive AES-GCM work on the encrypted
+        columns (``url``/``referer``/``custom_headers``), leaving them empty.
+        Listing/search/EPG code that only needs metadata uses this to avoid
+        decrypting an entire catalogue on the hot path.
+        """
         return Channel(
             database_id=row["id"],
             name=row["name"],
-            url=self._secrets.decrypt(row["url"]),
+            url=self._secrets.decrypt(row["url"]) if decrypt_urls else "",
             group=row["group_name"],
             logo=row["logo"],
             tvg_id=row["tvg_id"],
@@ -541,9 +587,11 @@ class DatabaseManager:
             xtream_id=row["xtream_id"],
             category_id=row["category_id"],
             user_agent=row["user_agent"],
-            referer=self._secrets.decrypt(row["referer"]),
-            custom_headers=DatabaseManager._decode_headers(
-                self._secrets.decrypt(row["custom_headers"])
+            referer=self._secrets.decrypt(row["referer"]) if decrypt_urls else "",
+            custom_headers=(
+                DatabaseManager._decode_headers(self._secrets.decrypt(row["custom_headers"]))
+                if decrypt_urls
+                else {}
             ),
             quality=row["quality"],
             extension=row["extension"],
@@ -553,6 +601,7 @@ class DatabaseManager:
             is_favorite=bool(row["is_favorite"]),
             has_archive=bool(row["has_archive"]),
             archive_duration_days=row["archive_duration_days"],
+            channel_number=int(row["channel_number"] or 0),
         )
 
     @staticmethod
@@ -563,28 +612,55 @@ class DatabaseManager:
         except (TypeError, json.JSONDecodeError):
             return {}
 
-    def get_channels(self, playlist_id: int, group: Optional[str] = None) -> list[Channel]:
-        """Get channels for a playlist, optionally filtered by group."""
+    def get_channels(
+        self,
+        playlist_id: int,
+        group: Optional[str] = None,
+        stream_type: Optional[str] = None,
+        decrypt_urls: bool = True,
+    ) -> list[Channel]:
+        """Get channels for a playlist, optionally filtered by group and stream_type."""
         with self._connection() as conn:
+            query = "SELECT * FROM channels WHERE playlist_id = ?"
+            params: list = [playlist_id]
+            if stream_type:
+                if stream_type == "vod":
+                    query += " AND stream_type IN ('vod', 'movie')"
+                else:
+                    query += " AND stream_type = ?"
+                    params.append(stream_type)
             if group:
-                cursor = conn.execute(
-                    "SELECT * FROM channels WHERE playlist_id = ? AND group_name = ? ORDER BY id",
-                    (playlist_id, group)
-                )
-            else:
-                cursor = conn.execute(
-                    "SELECT * FROM channels WHERE playlist_id = ? ORDER BY id",
-                    (playlist_id,)
-                )
-            return [self._row_to_channel(row) for row in cursor.fetchall()]
+                query += " AND group_name = ?"
+                params.append(group)
+            query += " ORDER BY id"
+            cursor = conn.execute(query, params)
+            return [
+                self._row_to_channel(row, decrypt_urls=decrypt_urls)
+                for row in cursor.fetchall()
+            ]
 
-    def get_groups(self, playlist_id: int) -> list[str]:
-        """Get unique channel groups for a playlist."""
+    def get_channel(self, channel_id: int, playlist_id: int) -> Optional[Channel]:
+        """Fetch and decrypt a single channel (used to hydrate light rows)."""
         with self._connection() as conn:
-            cursor = conn.execute(
-                "SELECT DISTINCT group_name FROM channels WHERE playlist_id = ? AND group_name != '' ORDER BY group_name",
-                (playlist_id,)
-            )
+            row = conn.execute(
+                "SELECT * FROM channels WHERE id = ? AND playlist_id = ?",
+                (channel_id, playlist_id),
+            ).fetchone()
+        return self._row_to_channel(row) if row else None
+
+    def get_groups(self, playlist_id: int, stream_type: Optional[str] = None) -> list[str]:
+        """Get unique channel groups for a playlist, optionally filtered by stream_type."""
+        with self._connection() as conn:
+            query = "SELECT DISTINCT group_name FROM channels WHERE playlist_id = ?"
+            params: list = [playlist_id]
+            if stream_type:
+                if stream_type == "vod":
+                    query += " AND stream_type IN ('vod', 'movie')"
+                else:
+                    query += " AND stream_type = ?"
+                    params.append(stream_type)
+            query += " AND group_name != '' ORDER BY group_name"
+            cursor = conn.execute(query, params)
             return [row["group_name"] for row in cursor.fetchall()]
 
     def set_favorite(self, channel_id: int, playlist_id: int, is_favorite: bool) -> bool:
@@ -786,7 +862,8 @@ class DatabaseManager:
                source = ?, xtream_id = ?, category_id = ?, user_agent = ?,
                referer = ?, custom_headers = ?, quality = ?, extension = ?,
                container_extension = ?, country_code = ?, provider_group = ?,
-               has_archive = ?, archive_duration_days = ?, content_hash = ?
+               has_archive = ?, archive_duration_days = ?, content_hash = ?,
+               channel_number = ?
                WHERE id = ? AND playlist_id = ?""",
             (
                 channel.name,
@@ -811,6 +888,7 @@ class DatabaseManager:
                 int(channel.has_archive),
                 channel.archive_duration_days,
                 self._channel_hash(channel),
+                int(channel.channel_number or 0),
                 channel_id,
                 playlist_id,
             ),
@@ -857,6 +935,13 @@ class DatabaseManager:
     ):
         self._catalog_stream_types(content_type)
         with self._connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM playlists WHERE id = ?", (playlist_id,)
+            ).fetchone()
+            if not exists:
+                # A background catalog load may still be running when its
+                # playlist is deleted; there is no state row left to update.
+                return
             conn.execute(
                 """INSERT INTO catalog_state
                    (playlist_id, content_type, status, item_count, updated_at, error)

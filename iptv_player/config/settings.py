@@ -16,6 +16,9 @@ class Settings:
     DEFAULTS = {
         "vlc_path": "",
         "dark_theme": True,
+        "first_run_done": False,
+        "auto_check_updates": True,
+        "last_update_check_ts": 0,
         "volume": 80,
         "recent_playlists": [],
         "epg_auto_update": True,
@@ -29,6 +32,8 @@ class Settings:
         "splitter_sizes": None,
         "recording_folder": str(Path.home() / "Videos" / "IPTV Recordings"),
         "stream_overlay_enabled": False,
+        "deinterlace": False,
+        "normalize_audio": True,
         "parental_lock_enabled": False,
         "parental_pin_hash": "",
         "parental_pin_salt": "",
@@ -37,6 +42,9 @@ class Settings:
         # Playback robustness.
         "auto_next_enabled": True,
         "auto_next_delay_ms": 2000,
+        "autoplay_last_channel": True,
+        "clean_channel_names": True,
+        "sleep_timer_minutes": 0,
         # Session restore.
         "last_playlist_id": None,
         "last_content_tab": 0,
@@ -53,6 +61,7 @@ class Settings:
         "max_connections": (1, 100),
         "image_cache_max_mb": (1, 10_000),
         "auto_next_delay_ms": (0, 60_000),
+        "sleep_timer_minutes": (0, 480),
         "last_content_tab": (0, 2),
         "last_channel_id": (0, 2**63 - 1),
     }

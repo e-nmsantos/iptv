@@ -34,6 +34,7 @@ class Channel:
     database_id: int = 0
     has_archive: bool = False
     archive_duration_days: int = 0
+    channel_number: int = 0
 
     def to_dict(self) -> dict:
         """Convert channel to dictionary for storage."""
@@ -65,6 +66,7 @@ class Channel:
             "database_id": self.database_id,
             "has_archive": self.has_archive,
             "archive_duration_days": self.archive_duration_days,
+            "channel_number": self.channel_number,
         }
 
     @classmethod

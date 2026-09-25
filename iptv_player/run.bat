@@ -1,55 +1,70 @@
 @echo off
-rem Define o modo de execucao para evitar que os comandos sejam exibidos.
+rem Define a codificacao para UTF-8 para suporte a acentos
+chcp 65001 >nul
 setlocal
 title IPTV Player
+
 echo ========================================
 echo       IPTV Player - A iniciar...
 echo ========================================
 echo.
 
-rem Muda o diretorio atual para o diretorio do script.
+rem Muda o diretorio atual para a pasta do script.
 cd /d "%~dp0"
 
-rem --- Verificação do VLC ---
-echo A verificar a instalação do VLC...
-reg query "HKLM\SOFTWARE\VideoLAN\VLC" /v InstallDir >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [^!] AVISO: O VLC Media Player não parece estar instalado.
-    echo     A aplicação pode não funcionar corretamente.
-    echo     Visite https://www.videolan.org/vlc/ para o instalar.
+rem --- Verificacao do VLC ---
+echo A verificar a instalacao do VLC...
+set "VLC_FOUND=0"
+if exist "C:\Program Files\VideoLAN\VLC\vlc.exe" set "VLC_FOUND=1"
+if exist "C:\Program Files (x86)\VideoLAN\VLC\vlc.exe" set "VLC_FOUND=1"
+if %VLC_FOUND% equ 0 (
+    reg query "HKLM\SOFTWARE\VideoLAN\VLC" /v InstallDir >nul 2>&1 && set "VLC_FOUND=1"
+)
+if %VLC_FOUND% equ 0 (
+    reg query "HKLM\SOFTWARE\WOW6432Node\VideoLAN\VLC" /v InstallDir >nul 2>&1 && set "VLC_FOUND=1"
+)
+if %VLC_FOUND% equ 0 (
+    reg query "HKCU\Software\VideoLAN\VLC" /v InstallDir >nul 2>&1 && set "VLC_FOUND=1"
+)
+
+if %VLC_FOUND% equ 0 (
+    echo [^!] AVISO: O VLC Media Player nao parece estar instalado.
+    echo     A aplicacao pode necessitar do VLC instalado para reproduzir video.
+    echo     Download gratuito em: https://www.videolan.org/vlc/
     echo.
 )
 
-rem Define os caminhos para o ambiente virtual e o executavel Python.
-set "VENV_DIR=%~dp0..\.venv"
+rem --- Definicao do Ambiente Virtual ---
+set "VENV_DIR=%~dp0.venv"
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+    if exist "%~dp0..\.venv\Scripts\python.exe" (
+        set "VENV_DIR=%~dp0..\.venv"
+    )
+)
 set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
 
-rem Verifica se o ambiente virtual existe, caso contrario, cria-o.
+rem Se o ambiente virtual nao existir, tenta criar
 if not exist "%PYTHON_EXE%" (
-    echo [^!] Ambiente virtual nao encontrado. A criar...
-    rem Tenta criar o ambiente virtual com 'py -3', com fallback para 'python'.
-    py -3 -m venv "%VENV_DIR%" 2>NUL
+    echo [^!] Ambiente virtual nao encontrado. A criar em %VENV_DIR%...
+    py -3 -m venv "%VENV_DIR%" 2>nul
     if errorlevel 1 (
-        echo [i] 'py -3' falhou ou nao foi encontrado. A tentar com 'python'...
-        python -m venv "%VENV_DIR%"
+        python -m venv "%VENV_DIR%" 2>nul
     )
 )
 
 if not exist "%PYTHON_EXE%" (
     echo [^!] ERRO: Nao foi possivel criar o ambiente virtual.
-    echo     Verifica se o Python esta instalado e disponivel no PATH.
+    echo     Verifica se o Python 3.10+ esta instalado e disponivel no PATH.
     pause
     exit /b 1
 )
 
 echo A verificar dependencias no ambiente virtual...
-"%PYTHON_EXE%" -c "import PySide6, vlc, requests, keyring; from Crypto.Cipher import AES" 2>nul
+"%PYTHON_EXE%" -c "import PySide6, vlc, requests, keyring, aiohttp, lxml, m3u8, aiofiles; from Crypto.Cipher import AES" 2>nul
 if %errorlevel% neq 0 (
-    echo [^!] A instalar dependencias...
-    rem Atualiza o pip para a versao mais recente.
-    echo [i] A atualizar o pip...
+    echo [^!] A instalar/atualizar dependencias necessarias...
+    echo [i] A atualizar o gestor pip...
     "%PYTHON_EXE%" -m pip install --upgrade pip >"pip_upgrade.log" 2>&1
-    rem Instala as dependencias a partir do ficheiro requirements.txt.
     echo [i] A instalar pacotes de requirements.txt...
     "%PYTHON_EXE%" -m pip install -r requirements.txt >"pip_install.log" 2>&1
     if %errorlevel% neq 0 (
@@ -70,11 +85,11 @@ if /I "%~1"=="--check" (
 echo.
 echo A iniciar o IPTV Player...
 echo.
-"%PYTHON_EXE%" main.py
+"%PYTHON_EXE%" main.py %*
 
 if %errorlevel% neq 0 (
     echo.
-    echo [^!] Erro ao iniciar. Verifica os detalhes acima.
+    echo [^!] A aplicacao terminou com erro ou foi encerrada.
     echo.
     pause
 )

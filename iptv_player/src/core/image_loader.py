@@ -6,6 +6,7 @@ QThreadPool; only cheap in-memory lookups and QPixmap creation happen on the
 GUI thread.
 """
 
+import logging
 from collections import OrderedDict
 from typing import Optional
 
@@ -16,6 +17,8 @@ from PySide6.QtGui import QImage, QPixmap
 from config.settings import Settings
 
 from .image_cache import ImageCache
+
+logger = logging.getLogger(__name__)
 
 _MEMORY_CACHE_LIMIT = 300
 _REQUEST_TIMEOUT_SECONDS = 8
@@ -40,7 +43,8 @@ class _ImageFetchTask(QRunnable):
                 response = requests.get(self._url, timeout=_REQUEST_TIMEOUT_SECONDS)
                 response.raise_for_status()
                 data = response.content
-            except Exception:
+            except Exception as exc:
+                logger.debug("Failed to fetch image %s: %s", self._url, exc)
                 self.signals.finished.emit(self._url, self._target_size, None)
                 return
             self._disk_cache.write(self._url, data)

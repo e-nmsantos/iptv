@@ -17,6 +17,14 @@ android {
         versionCode = 18
         versionName = "0.13.0-beta01"
 
+        // Optional TMDB metadata lookup. Supplied through -PTMDB_API_KEY=... or
+        // gradle.properties so no API key is committed to the repository.
+        buildConfigField(
+            "String",
+            "TMDB_API_KEY",
+            "\"${project.findProperty("TMDB_API_KEY") ?: ""}\"",
+        )
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

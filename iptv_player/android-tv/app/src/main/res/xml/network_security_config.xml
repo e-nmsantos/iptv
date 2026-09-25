@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    IPTV streams, M3U lists and many Xtream/Stalker portals are only reachable
+    over plain HTTP, so cleartext is kept permitted at the base-config level.
+
+    Concentrating this decision here (instead of the blanket
+    android:usesCleartextTraffic flag) keeps it in a single, greppable,
+    documented place and allows tightening it per-domain later without touching
+    the manifest.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
