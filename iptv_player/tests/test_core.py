@@ -123,8 +123,157 @@ class ParentalSecurityTests(unittest.TestCase):
         now[0] += 30
         self.assertTrue(limiter.is_allowed())
 
+    def test_pin_hash_is_verifiable_and_tamper_proof(self):
+        from src.core.parental import generate_salt, hash_pin, verify_pin
+
+        salt = generate_salt()
+        digest = hash_pin("1234", salt)
+
+        self.assertTrue(verify_pin("1234", salt, digest))
+        self.assertFalse(verify_pin("4321", salt, digest))
+        self.assertFalse(verify_pin("1234", salt, digest[:-2] + "00"))
+
+
+class HelpersAndCacheTests(unittest.TestCase):
+    def test_format_duration_handles_hours_minutes_and_negative(self):
+        from src.utils.helpers import format_duration
+
+        self.assertEqual(format_duration(0), "00:00")
+        self.assertEqual(format_duration(65), "01:05")
+        self.assertEqual(format_duration(3661), "01:01:01")
+        self.assertEqual(format_duration(-5), "00:00")
+
+    def test_sanitize_filename_strips_invalid_characters(self):
+        from src.utils.helpers import sanitize_filename
+
+        self.assertEqual(sanitize_filename('a<b>c:d"e/f\\g|h?i*j'), "abcdefghij")
+        self.assertEqual(sanitize_filename("...name..."), "name")
+
+    def test_parse_epg_time_supports_common_formats(self):
+        from src.utils.helpers import parse_epg_time
+
+        self.assertIsNotNone(parse_epg_time("20260724120000 +0000"))
+        self.assertIsNotNone(parse_epg_time("2026-07-24 12:00:00"))
+        self.assertIsNone(parse_epg_time("not-a-date"))
+
+    def test_http_session_cancels_before_request(self):
+        from src.core.http_client import HttpSession, RequestCancelled
+
+        session = HttpSession(timeout=30, cancel_requested=lambda: True)
+        with self.assertRaises(RequestCancelled):
+            session.get("https://example.test/")
+
+    def test_http_session_applies_default_timeout(self):
+        from src.core.http_client import HttpSession
+
+        self.assertEqual(HttpSession(timeout=15)._default_timeout, 15)
+        self.assertEqual(HttpSession(timeout=1)._default_timeout, 5)
+
+    def test_http_retry_methods_are_configurable(self):
+        from src.core.http_client import HttpSession
+
+        default_adapter = HttpSession().get_adapter("https://example.test")
+        post_adapter = HttpSession(
+            retry_methods=frozenset({"GET", "POST"})
+        ).get_adapter("https://example.test")
+
+        self.assertNotIn("POST", default_adapter.max_retries.allowed_methods)
+        self.assertIn("POST", post_adapter.max_retries.allowed_methods)
+
+    def test_http_session_cancellation_predicate_can_be_swapped(self):
+        from src.core.http_client import HttpSession, RequestCancelled
+
+        session = HttpSession()
+        session.set_cancel_requested(lambda: True)
+        with self.assertRaises(RequestCancelled):
+            session.get("https://example.test/")
+
+    def test_stalker_session_retries_post_requests(self):
+        parser = StalkerParser("https://example.test", "00:00:00:00:00:00")
+        adapter = parser._session.get_adapter("https://example.test")
+        try:
+            self.assertIn("POST", adapter.max_retries.allowed_methods)
+        finally:
+            parser.close()
+
+    def test_image_cache_round_trips_and_reports_misses(self):
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        from src.core.image_cache import ImageCache
+
+        with _tempfile.TemporaryDirectory() as directory:
+            cache = ImageCache(_Path(directory), max_mb=1)
+            cache.write("https://example.test/logo.png", b"data")
+            self.assertEqual(cache.read("https://example.test/logo.png"), b"data")
+            self.assertIsNone(cache.read("https://example.test/missing.png"))
+
+    def test_xtream_provider_dispatches_catalog_kinds(self):
+        from src.core.providers import CatalogKind, XtreamProvider
+
+        class FakeParser:
+            def get_live_channels(self):
+                return [Channel("Live", "https://live.test")]
+
+            def get_vod_streams(self):
+                return [Channel("Vod", "https://vod.test")]
+
+            def get_series_channels(self, should_cancel=None, progress=None):
+                return [Channel("Series", "https://series.test")]
+
+        provider = XtreamProvider(FakeParser())
+        self.assertEqual(provider.load_catalog(CatalogKind.LIVE)[0].name, "Live")
+        self.assertEqual(provider.load_catalog(CatalogKind.VOD)[0].name, "Vod")
+        self.assertEqual(provider.load_catalog(CatalogKind.SERIES)[0].name, "Series")
+
+    def test_stalker_provider_dispatches_catalog_kinds_and_headers(self):
+        from src.core.providers import CatalogKind, StalkerProvider
+
+        class FakeParser:
+            def get_channels(self):
+                return [Channel("Live", "https://live.test")]
+
+            def get_vod_movies(self, should_cancel=None, progress=None):
+                return [Channel("Movie", "opaque", stream_type="vod", source="stalker")]
+
+            def get_series_shows(self, should_cancel=None, progress=None):
+                return [Channel("Show", "", stream_type="series", source="stalker")]
+
+            def playback_headers(self):
+                return {"User-Agent": "MAG"}
+
+        provider = StalkerProvider(FakeParser())
+        self.assertEqual(provider.load_catalog(CatalogKind.LIVE)[0].name, "Live")
+        self.assertEqual(provider.load_catalog(CatalogKind.VOD)[0].name, "Movie")
+        self.assertEqual(provider.load_catalog(CatalogKind.SERIES)[0].name, "Show")
+        self.assertEqual(provider.playback_headers(), {"User-Agent": "MAG"})
+
 
 class ControllerTests(unittest.TestCase):
+    def test_playback_controller_finds_a_backup_stream(self):
+        from src.controllers.playback_controller import PlaybackController
+
+        controller = PlaybackController(MagicMock())
+        primary = Channel("Canal HD", "https://a.test/1.ts", stream_type="live")
+        backup = Channel("Canal HD", "https://b.test/1.ts", stream_type="live")
+        other = Channel("Outro Canal", "https://c.test/1.ts", stream_type="live")
+
+        fallback = controller.find_fallback_channel(
+            primary, [primary, backup, other]
+        )
+
+        self.assertIs(fallback, backup)
+
+    def test_playback_controller_returns_no_fallback_without_a_mirror(self):
+        from src.controllers.playback_controller import PlaybackController
+
+        controller = PlaybackController(MagicMock())
+        primary = Channel("Canal HD", "https://a.test/1.ts", stream_type="live")
+
+        self.assertIsNone(
+            controller.find_fallback_channel(primary, [primary])
+        )
+
     def test_playlist_and_playback_controllers_delegate_domain_operations(self):
         database = MagicMock()
         playlist = Playlist("Teste", "m3u")
@@ -271,6 +420,7 @@ class DatabaseTests(unittest.TestCase):
                         country_code="UK",
                         provider_group="┃UK┃ GENERAL",
                         is_favorite=True,
+                        channel_number=12,
                     )
                 ],
             )
@@ -296,12 +446,65 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(loaded.country_code, "UK")
             self.assertEqual(loaded.provider_group, "┃UK┃ GENERAL")
             self.assertTrue(loaded.is_favorite)
+            self.assertEqual(loaded.channel_number, 12)
             self.assertTrue(raw_playlist_name.startswith(SecretStore.PREFIX))
             self.assertTrue(raw_channel[0].startswith(SecretStore.PREFIX))
             self.assertTrue(raw_channel[1].startswith(SecretStore.PREFIX))
             self.assertTrue(raw_channel[2].startswith(SecretStore.PREFIX))
 
         self.assertFalse(db_path.exists(), "Temporary DB should not remain locked")
+
+    def test_light_load_skips_decryption_and_single_channel_hydrates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = DatabaseManager(
+                Path(temp_dir) / "test.db", secret_store=self.secrets
+            )
+            playlist = Playlist(
+                "Light",
+                "m3u",
+                channels=[
+                    Channel(
+                        "Canal A",
+                        "https://example.test/live/a",
+                        referer="https://referrer.test/",
+                        custom_headers={"Cookie": "a=b"},
+                    ),
+                    Channel("Canal B", "https://example.test/live/b"),
+                ],
+            )
+            playlist_id = db.save_playlist(playlist)
+
+            light = db.get_channels(playlist_id, decrypt_urls=False)
+            self.assertEqual(len(light), 2)
+            self.assertEqual(light[0].name, "Canal A")
+            self.assertEqual(light[0].url, "")
+            self.assertEqual(light[0].referer, "")
+            self.assertEqual(light[0].custom_headers, {})
+            self.assertGreater(light[0].database_id, 0)
+
+            hydrated = db.get_channel(light[0].database_id, playlist_id)
+            self.assertEqual(hydrated.url, "https://example.test/live/a")
+            self.assertEqual(hydrated.referer, "https://referrer.test/")
+            self.assertEqual(hydrated.custom_headers, {"Cookie": "a=b"})
+
+    def test_metadata_flags_are_persisted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = DatabaseManager(
+                Path(temp_dir) / "test.db", secret_store=self.secrets
+            )
+            self.assertFalse(db.get_metadata_flag("some:flag"))
+            db.set_metadata_flag("some:flag")
+            self.assertTrue(db.get_metadata_flag("some:flag"))
+
+    def test_set_catalog_state_is_safe_when_playlist_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = DatabaseManager(
+                Path(temp_dir) / "test.db", secret_store=self.secrets
+            )
+            # A background catalog load can outlive its playlist; writing its
+            # state for a deleted playlist must not raise (FK constraint).
+            db.set_catalog_state(999, "live", "error", 0, "falhou")
+            self.assertIsNone(db.get_catalog_state(999, "live"))
 
     def test_favorites_are_filtered_and_use_channel_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -887,6 +1090,53 @@ class UpdateManagerTests(unittest.TestCase):
             path.write_bytes(b"tampered")
             self.assertFalse(verify_artifact(path, artifact))
 
+    def test_select_artifact_prefers_installer_on_windows(self):
+        from src.core.update_manager import ReleaseInfo, select_artifact
+
+        info = ReleaseInfo(
+            version="0.5.3",
+            published_at="",
+            notes_url="",
+            artifacts=(
+                ReleaseArtifact(
+                    "windows-x86_64-portable",
+                    "p.zip",
+                    "https://example.test/p.zip",
+                    "a" * 64,
+                    1,
+                ),
+                ReleaseArtifact(
+                    "windows-x86_64-installer",
+                    "s.exe",
+                    "https://example.test/s.exe",
+                    "b" * 64,
+                    2,
+                ),
+            ),
+        )
+        with patch("platform.system", return_value="Windows"):
+            self.assertEqual(select_artifact(info).filename, "s.exe")
+
+    def test_select_artifact_returns_none_on_unsupported_platform(self):
+        from src.core.update_manager import ReleaseInfo, select_artifact
+
+        info = ReleaseInfo(
+            version="0.5.3",
+            published_at="",
+            notes_url="",
+            artifacts=(
+                ReleaseArtifact(
+                    "windows-x86_64-installer",
+                    "s.exe",
+                    "https://example.test/s.exe",
+                    "b" * 64,
+                    2,
+                ),
+            ),
+        )
+        with patch("platform.system", return_value="Linux"):
+            self.assertIsNone(select_artifact(info))
+
 
 class BackupTests(unittest.TestCase):
     def test_encrypted_backup_round_trip_and_wrong_password(self):
@@ -1046,6 +1296,77 @@ class ProviderClientLifecycleTests(unittest.TestCase):
         parser.authenticate.assert_called_once_with()
         parser.close.assert_called_once_with()
 
+    def test_discard_does_not_close_a_session_that_is_in_use(self):
+        import threading
+        import time
+
+        database = MagicMock()
+        database.get_playlist.return_value = {
+            "source_type": "xtream",
+            "server_url": "https://example.test",
+            "username": "user",
+            "password": "secret",
+        }
+        parser = MagicMock()
+        manager = ProviderSessionManager(database, lambda: 15)
+        entered = threading.Event()
+        release = threading.Event()
+
+        with patch("src.core.provider_sessions.XtreamParser", return_value=parser):
+
+            def blocking_call(_client):
+                entered.set()
+                release.wait(5)
+                return "done"
+
+            worker = threading.Thread(
+                target=manager.call_xtream, args=(7, blocking_call)
+            )
+            worker.start()
+            self.assertTrue(entered.wait(5))
+
+            # discard() must not tear the parser down while a call is in
+            # flight, and must not block the caller waiting for it.
+            started = time.monotonic()
+            manager.discard(7)
+            self.assertLess(time.monotonic() - started, 1.0)
+            parser.close.assert_not_called()
+
+            release.set()
+            worker.join(5)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and parser.close.call_count == 0:
+            time.sleep(0.01)
+        parser.close.assert_called_once_with()
+
+    def test_provider_sessions_receive_a_live_cancel_predicate(self):
+        database = MagicMock()
+        database.get_playlist.return_value = {
+            "source_type": "xtream",
+            "server_url": "https://example.test",
+            "username": "user",
+            "password": "secret",
+        }
+        cancelled = {"value": False}
+        parser = MagicMock()
+        manager = ProviderSessionManager(
+            database, lambda: 15, lambda: cancelled["value"]
+        )
+        with patch(
+            "src.core.provider_sessions.XtreamParser", return_value=parser
+        ) as factory:
+            manager.call_xtream(7, lambda client: client)
+            kwargs = factory.call_args.kwargs
+            try:
+                # The predicate is evaluated lazily, on every request, so a
+                # task cancelled after the session was built still aborts.
+                self.assertFalse(kwargs["cancel_requested"]())
+                cancelled["value"] = True
+                self.assertTrue(kwargs["cancel_requested"]())
+            finally:
+                manager.discard(7)
+
     def test_provider_neutral_contract_wraps_cached_client(self):
         database = MagicMock()
         database.get_playlist.return_value = {
@@ -1096,6 +1417,29 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_infer_stream_type_uses_explicit_metadata_and_patterns(self):
+        self.assertEqual(
+            M3UParser.infer_stream_type("https://example.test/a", explicit_type="movie"),
+            "vod",
+        )
+        self.assertEqual(
+            M3UParser.infer_stream_type("https://example.test/a", explicit_type="series"),
+            "series",
+        )
+        self.assertEqual(M3UParser.infer_stream_type("https://example.test/live/a.ts"), "live")
+        self.assertEqual(
+            M3UParser.infer_stream_type("https://example.test/a.mkv", name="Show S01E02"),
+            "series",
+        )
+        self.assertEqual(
+            M3UParser.infer_stream_type("https://example.test/a.mp4", duration=5400.0),
+            "vod",
+        )
+        self.assertEqual(
+            M3UParser.infer_stream_type("https://example.test/a.ts", group="VOD | Filmes"),
+            "vod",
+        )
+
     def test_m3u_headers_are_parsed(self):
         content = """#EXTM3U x-tvg-url="https://epg.test/guide.xml.gz"
 #EXTINF:-1 tvg-id="one" user-agent="UA" referer="https://ref.test/",Canal HD
@@ -1111,6 +1455,63 @@ https://example.test/live.m3u8
         self.assertEqual(channel.quality, "HD")
         self.assertEqual(channel.epg_channel_id, "one")
         self.assertEqual(playlist.epg_url, "https://epg.test/guide.xml.gz")
+
+    def test_m3u_parses_extgrp_and_keeps_channel_number_out_of_epg_id(self):
+        content = """#EXTM3U
+#EXTINF:-1 tvg-id="one" tvg-chno="12",Canal
+#EXTGRP:Desporto
+https://example.test/live.m3u8
+"""
+        channel = M3UParser()._parse_content(content, "Test").channels[0]
+
+        self.assertEqual(channel.group, "Desporto")
+        self.assertEqual(channel.epg_channel_id, "one")
+        self.assertEqual(channel.channel_number, 12)
+
+    def test_m3u_parse_can_be_cancelled(self):
+        from src.core.http_client import RequestCancelled
+
+        parser = M3UParser(should_cancel=lambda: True)
+        with self.assertRaises(RequestCancelled):
+            parser._parse_content(
+                "#EXTM3U\n#EXTINF:-1,Canal\nhttps://example.test/live.m3u8\n",
+                "Test",
+            )
+
+    def test_gzipped_m3u_playlist_is_decoded(self):
+        import gzip as _gzip
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        content = (
+            b"#EXTM3U\n#EXTINF:-1,Canal\nhttps://example.test/live.m3u8\n"
+        )
+        with _tempfile.TemporaryDirectory() as directory:
+            path = _Path(directory) / "list.m3u.gz"
+            path.write_bytes(_gzip.compress(content))
+
+            playlist = M3UParser().parse(str(path), "Test")
+
+        self.assertEqual([channel.name for channel in playlist.channels], ["Canal"])
+
+    def test_xtream_episodes_tolerate_malformed_payload(self):
+        parser = XtreamParser("https://example.test", "user", "secret")
+        parser.get_series_info = lambda _series_id: {
+            "episodes": {
+                "not-a-season": [
+                    {"id": "1", "title": "Ep 1", "info": None},
+                    "not-a-dict",
+                ],
+                "2": [{"id": "2", "title": "Ep 2", "episode_num": "abc"}],
+            }
+        }
+
+        episodes = parser.get_episodes_for_series("42")
+
+        self.assertEqual([episode.name for episode in episodes], ["Ep 1", "Ep 2"])
+        self.assertEqual(episodes[0].season_number, 0)
+        self.assertEqual(episodes[1].season_number, 2)
+        self.assertEqual(episodes[1].episode_number, 0)
 
     def test_m3u_separates_live_vod_and_series(self):
         content = """#EXTM3U
@@ -1269,7 +1670,7 @@ https://cdn.test/channel/5.m3u8
             "https://example.test", "00:00:00:00:00:00"
         )
         parser._token = "test-token"
-        parser.get_channels = lambda: [Channel("Live", "https://live.test")]
+        parser.get_channels = lambda **_kwargs: [Channel("Live", "https://live.test")]
         parser.get_vod_movies = lambda **_kwargs: [
             Channel("Movie", "opaque", stream_type="vod", source="stalker")
         ]
@@ -1288,6 +1689,12 @@ https://cdn.test/channel/5.m3u8
         class Response:
             headers = {}
             encoding = "utf-8"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
 
             @staticmethod
             def raise_for_status():
@@ -1310,7 +1717,7 @@ https://cdn.test/channel/5.m3u8
             "https://example.test", "00:00:00:00:00:00"
         )
         parser._token = "test-token"
-        parser.get_channels = lambda: [
+        parser.get_channels = lambda **_kwargs: [
             Channel("Canal", "https://stream.example.test/live.ts")
         ]
         parser.get_vod_movies = lambda: self.fail("VOD should be lazy")
@@ -1319,6 +1726,147 @@ https://cdn.test/channel/5.m3u8
         playlist = parser.get_full_playlist()
 
         self.assertEqual(len(playlist.channels), 1)
+
+    def test_stalker_reauthenticates_when_create_link_token_expired(self):
+        parser = StalkerParser("https://example.test", "00:00:00:00:00:00")
+        parser._token = "expired-token"
+        payloads = [
+            {},  # expired token -> portal answers without a cmd
+            {"js": {"cmd": "ffmpeg https://stream.example.test/vod/9.mp4"}},
+        ]
+        auth_calls = []
+        parser._post = lambda _data: object()
+        parser._parse_response = lambda _response: payloads.pop(0)
+        parser.authenticate = lambda: auth_calls.append(1) or True
+
+        url = parser.resolve_link("opaque-cmd")
+
+        self.assertEqual(url, "https://stream.example.test/vod/9.mp4")
+        self.assertEqual(len(auth_calls), 1)
+
+    def test_stalker_create_link_skips_reauthentication_when_successful(self):
+        parser = StalkerParser("https://example.test", "00:00:00:00:00:00")
+        parser._token = "valid-token"
+        parser._post = lambda _data: object()
+        parser._parse_response = lambda _response: {
+            "js": {"cmd": "ffmpeg https://stream.example.test/vod/10.mp4"}
+        }
+        parser.authenticate = self.fail
+
+        url = parser.resolve_link("opaque-cmd")
+
+        self.assertEqual(url, "https://stream.example.test/vod/10.mp4")
+
+    def test_stalker_catchup_accepts_start_and_duration(self):
+        parser = StalkerParser("https://example.test", "00:00:00:00:00:00")
+        parser._token = "valid-token"
+        sent = {}
+        parser._post = lambda data: sent.update(data) or object()
+        parser._parse_response = lambda _response: {
+            "js": {"cmd": "ffmpeg https://stream.example.test/archive/1.ts"}
+        }
+
+        url = parser.resolve_catchup_link("localhost/ch/1", 1784894400, 3600)
+
+        self.assertEqual(url, "https://stream.example.test/archive/1.ts")
+        self.assertEqual(sent["archive"], "1")
+        self.assertEqual(sent["start"], "1784894400")
+        self.assertEqual(sent["end"], "1784898000")
+
+    def test_stalker_playback_headers_can_be_built_without_authenticating(self):
+        headers = StalkerParser.playback_headers_for("https://portal.test/c/")
+
+        self.assertIn("MAG425", headers["User-Agent"])
+        self.assertEqual(headers["Referer"], "https://portal.test/c/")
+
+    def test_xtream_playlist_counts_reflect_real_channels(self):
+        parser = XtreamParser("https://example.test", "user", "password")
+        parser._info = {"user_info": {"auth": 1, "max_connections": "2"}}
+        parser.get_live_channels = lambda: [Channel("Live", "https://live.test")]
+        parser.get_vod_streams = lambda: [
+            Channel("Movie", "https://vod.test", stream_type="vod")
+        ]
+        parser.get_series_channels = lambda *_args, **_kwargs: [
+            Channel("Show", "", stream_type="series")
+        ]
+
+        playlist = parser.get_full_playlist()
+
+        # max_connections is a concurrency limit, not a channel count: the
+        # previous code reported "2" for a playlist holding 3 channels.
+        self.assertEqual(playlist.total_channels, 3)
+        self.assertEqual(playlist.total_vod, 1)
+        self.assertEqual(playlist.total_series, 1)
+
+    def test_xtream_session_leaves_retrying_to_the_api_request_layer(self):
+        parser = XtreamParser("https://example.test", "user", "password")
+        adapter = parser._session.get_adapter("https://example.test")
+        try:
+            self.assertEqual(adapter.max_retries.total, 0)
+        finally:
+            parser.close()
+
+
+class ContentTypesTests(unittest.TestCase):
+    def test_tab_index_maps_to_a_content_type(self):
+        from src.core.content_types import content_type_for_tab
+
+        self.assertEqual(content_type_for_tab(0), "live")
+        self.assertEqual(content_type_for_tab(1), "vod")
+        self.assertEqual(content_type_for_tab(2), "series")
+        self.assertEqual(content_type_for_tab(9, default=""), "")
+
+    def test_stream_types_normalise_the_movie_alias(self):
+        from src.core.content_types import content_type_for_stream
+
+        self.assertEqual(content_type_for_stream("live"), "live")
+        self.assertEqual(content_type_for_stream("vod"), "vod")
+        self.assertEqual(content_type_for_stream("movie"), "vod")
+        self.assertEqual(content_type_for_stream("series"), "series")
+        self.assertEqual(content_type_for_stream("outro"), "")
+
+
+class CatalogMixinHelperTests(unittest.TestCase):
+    def _window(self):
+        from src.ui.catalog_mixin import CatalogMixin
+
+        class Window(CatalogMixin):
+            pass
+
+        return Window()
+
+    def test_playlist_channel_cache_is_bounded_and_keeps_the_newest(self):
+        from src.ui.catalog_mixin import CatalogMixin
+
+        window = self._window()
+        limit = CatalogMixin._PLAYLIST_CACHE_LIMIT
+        for playlist_id in range(limit + 3):
+            window._cache_playlist_channels(playlist_id, {"live": []})
+
+        self.assertEqual(len(window._playlist_channel_cache), limit)
+        self.assertNotIn(0, window._playlist_channel_cache)
+        self.assertIn(limit + 2, window._playlist_channel_cache)
+
+    def test_epg_load_key_distinguishes_channels_without_a_row_id(self):
+        from src.ui.catalog_mixin import CatalogMixin
+
+        first = CatalogMixin._epg_load_key(
+            1, Channel("Canal A", "", database_id=0, tvg_id="a")
+        )
+        second = CatalogMixin._epg_load_key(
+            1, Channel("Canal B", "", database_id=0, tvg_id="b")
+        )
+
+        self.assertNotEqual(first, second)
+
+    def test_epg_load_key_prefers_the_database_row(self):
+        from src.ui.catalog_mixin import CatalogMixin
+
+        key = CatalogMixin._epg_load_key(
+            7, Channel("Canal", "", database_id=42, tvg_id="a")
+        )
+
+        self.assertEqual(key, (7, 42))
 
 
 class EPGTests(unittest.TestCase):
@@ -1490,8 +2038,8 @@ class MediaPlayerTests(unittest.TestCase):
 
         self.assertIn(":http-reconnect", player._instance.media.options)
         self.assertIn(":http-continuous", player._instance.media.options)
-        self.assertIn(":network-caching=5000", player._instance.media.options)
-        self.assertIn(":live-caching=5000", player._instance.media.options)
+        self.assertIn(":network-caching=1500", player._instance.media.options)
+        self.assertIn(":live-caching=1500", player._instance.media.options)
 
     def test_vod_http_does_not_use_continuous_mode_and_seeks_by_time(self):
         player = self._player_without_vlc()
@@ -1547,6 +2095,271 @@ class MediaPlayerTests(unittest.TestCase):
             player._init_vlc(vlc_path)
 
         self.assertIsNotNone(player._player)
+
+
+class ChannelCleanerTests(unittest.TestCase):
+    def test_clean_name_strips_country_prefix_and_quality_tags(self):
+        from src.core.channel_cleaner import ChannelCleaner
+
+        raw1 = "PT | RTP 1 FHD (1080p) [BACKUP]"
+        raw2 = "PT: SPORT TV 1 4K [RAW]"
+        raw3 = "[PT] SIC NOTICIAS (HEVC)"
+        raw4 = "1 - TVI HD"
+
+        self.assertEqual(ChannelCleaner.clean_name(raw1), "RTP 1")
+        self.assertEqual(ChannelCleaner.clean_name(raw2), "SPORT TV 1")
+        self.assertEqual(ChannelCleaner.clean_name(raw3), "SIC NOTICIAS")
+        self.assertEqual(ChannelCleaner.clean_name(raw4), "TVI")
+
+    def test_alternate_stream_finder_matches_backup_channels(self):
+        from src.core.channel import Channel
+        from src.core.channel_cleaner import ChannelCleaner
+
+        main_ch = Channel("PT: RTP 1 FHD", "http://stream1.ts", stream_type="live")
+        backup_ch = Channel("PT | RTP 1 HD (BACKUP)", "http://stream2.ts", stream_type="live")
+        other_ch = Channel("PT: SIC HD", "http://stream3.ts", stream_type="live")
+
+        alternates = ChannelCleaner.find_alternate_streams(main_ch, [main_ch, backup_ch, other_ch])
+        self.assertEqual(len(alternates), 1)
+        self.assertEqual(alternates[0].url, "http://stream2.ts")
+
+
+class MetadataEnricherTests(unittest.TestCase):
+    def test_extract_title_and_year_parses_properly(self):
+        from src.core.metadata_enricher import MetadataEnricher
+
+        title1, year1 = MetadataEnricher.extract_title_and_year("Inception (2010) [1080p]")
+        title2, year2 = MetadataEnricher.extract_title_and_year("The Matrix (1999) 4K HEVC")
+        title3, year3 = MetadataEnricher.extract_title_and_year("Gladiator")
+
+        self.assertEqual(title1, "Inception")
+        self.assertEqual(year1, 2010)
+        self.assertEqual(title2, "The Matrix")
+        self.assertEqual(year2, 1999)
+        self.assertEqual(title3, "Gladiator")
+        self.assertIsNone(year3)
+
+
+class RadioSyncTests(unittest.TestCase):
+    def test_radio_sync_manages_state_and_delay(self):
+        from src.player.radio_sync import RadioSyncManager
+
+        manager = RadioSyncManager()
+        self.assertFalse(manager.is_active)
+        self.assertEqual(manager.delay_ms, 0)
+
+        manager.start("https://radio.example.com/stream.mp3", initial_delay_ms=250)
+        self.assertTrue(manager.is_active)
+        self.assertEqual(manager.delay_ms, 250)
+
+        manager.adjust_delay(150)
+        self.assertEqual(manager.delay_ms, 400)
+
+        manager.stop()
+        self.assertFalse(manager.is_active)
+
+
+class ServerSpeedtestTests(unittest.TestCase):
+    def test_speedtest_result_representation(self):
+        from src.core.server_speedtest import SpeedtestResult
+
+        res = SpeedtestResult("server.iptv.com", latency_ms=45.2, download_speed_mbps=38.5, status="Excelente")
+        d = res.to_dict()
+        self.assertEqual(d["server_host"], "server.iptv.com")
+        self.assertEqual(d["latency_ms"], 45.2)
+        self.assertEqual(d["download_speed_mbps"], 38.5)
+        self.assertEqual(d["status"], "Excelente")
+
+
+class SubtitlesFinderTests(unittest.TestCase):
+    def test_save_subtitle_file_writes_utf8_srt(self):
+        import tempfile
+        from pathlib import Path
+
+        from src.core.subtitles_finder import SubtitlesFinder
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            finder = SubtitlesFinder(cache_dir=Path(tmp_dir))
+            saved = finder.save_subtitle_file("1\n00:00:01,000 --> 00:00:03,000\nOlá mundo!", "legendas")
+            self.assertTrue(saved.exists())
+            self.assertTrue(saved.name.endswith(".srt"))
+            with open(saved, encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("Olá mundo!", content)
+
+    def test_subtitle_dialogs_instantiate(self):
+        from src.ui.dialogs import SubtitleDelayDialog, SubtitleSearchDialog
+        dialog1 = SubtitleSearchDialog(initial_query="")
+        self.assertIsNotNone(dialog1)
+        dialog_movie = SubtitleSearchDialog(initial_query="[PT] Matrix 1999 [FHD]")
+        self.assertEqual(dialog_movie._movie_title.text(), "Matrix")
+        self.assertEqual(dialog_movie._movie_year.text(), "1999")
+        dialog_series = SubtitleSearchDialog(initial_query="Breaking Bad S02E05")
+        self.assertEqual(dialog_series._series_title.text(), "Breaking Bad")
+        self.assertEqual(dialog_series._season_spin.value(), 2)
+        self.assertEqual(dialog_series._episode_spin.value(), 5)
+        dialog2 = SubtitleDelayDialog(media_player=None)
+        self.assertIsNotNone(dialog2)
+
+
+class NewFeaturesTests(unittest.TestCase):
+    """Unit tests for VOD Downloader, MultiView, and new Dialogs."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            cls.app = QApplication([])
+        else:
+            cls.app = QApplication.instance()
+
+    def test_vod_downloader_lifecycle(self):
+        import tempfile
+
+        from src.core.downloader import VODDownloader
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mgr = VODDownloader(download_dir=Path(tmp_dir))
+            task = mgr.start_download(
+                title="Test Movie 2024",
+                url="http://example.com/test.mp4",
+            )
+            self.assertIsNotNone(task)
+            self.assertEqual(task.title, "Test Movie 2024")
+            self.assertEqual(mgr.get_task(task.task_id), task)
+            self.assertIn(task, mgr.list_tasks())
+
+            # Test pause, resume, cancel
+            mgr.pause_download(task.task_id)
+            mgr.resume_download(task.task_id)
+            mgr.cancel_download(task.task_id, delete_file=False)
+            self.assertEqual(task.status, "cancelled")
+
+    def test_multiview_and_download_manager_dialogs(self):
+        from src.core.channel import Channel
+        from src.ui.download_manager_dialog import DownloadManagerDialog
+        from src.ui.multi_view_dialog import MultiViewDialog
+
+        ch1 = Channel(database_id=1, name="RTP 1", stream_type="live", url="http://example.com/rtp1.ts")
+        ch2 = Channel(database_id=2, name="SIC", stream_type="live", url="http://example.com/sic.ts")
+
+        mv_dialog = MultiViewDialog(channels=[ch1, ch2], initial_channel=ch1)
+        self.assertIsNotNone(mv_dialog)
+        mv_dialog._set_layout(4)
+        self.assertEqual(mv_dialog._multiview._active_slots_count, 4)
+        mv_dialog.close()
+
+        dl_dialog = DownloadManagerDialog(media_player=None)
+        self.assertIsNotNone(dl_dialog)
+        dl_dialog.close()
+
+    def test_cast_manager_and_dialog(self):
+        from unittest.mock import patch
+
+        from src.core.cast_manager import CastDevice, CastManager
+        from src.ui.cast_dialog import CastDialog
+
+        cast_mgr = CastManager.get_instance()
+        self.assertIsNotNone(cast_mgr)
+
+        dev = CastDevice(
+            device_id="test_tv_1",
+            name="Sala de Estar TV",
+            device_type="smart_tv",
+            location="http://127.0.0.1:8080/desc.xml",
+            control_url="http://127.0.0.1:8080/AVTransport/control",
+        )
+        cast_mgr._devices[dev.device_id] = dev
+        self.assertIn(dev, cast_mgr.list_devices())
+
+        with patch.object(cast_mgr, "_send_dlna_play", return_value=True), \
+             patch.object(cast_mgr, "_send_dlna_stop", return_value=True):
+            cast_mgr.cast_to_device(
+                dev,
+                "http://example.com/stream.ts?a=1&b=2",
+                "RTP 1",
+                headers={"User-Agent": "TestUA/1.0"},
+                is_live=True,
+            )
+            self.assertTrue(cast_mgr.is_casting)
+            self.assertEqual(cast_mgr.active_device, dev)
+
+            cast_mgr.stop_cast()
+            self.assertFalse(cast_mgr.is_casting)
+
+        # Test CastStreamProxy directly
+        from src.core.cast_manager import CastStreamProxy
+        proxy = CastStreamProxy()
+        port = proxy.start()
+        self.assertGreater(port, 0)
+        proxy_url = proxy.set_target("http://example.com/live.ts", headers={"User-Agent": "Test"}, is_live=True)
+        self.assertIn(f":{port}/hls/live.m3u8", proxy_url)
+        vod_url = proxy.set_target("http://example.com/movie.mp4", is_live=False)
+        self.assertIn(f":{port}/stream.mp4", vod_url)
+        proxy.stop()
+
+        # Test Chromecast host fallback
+        cc_dev = CastDevice(
+            device_id="cast_test_1",
+            name="Test Chromecast",
+            device_type="chromecast",
+            location="192.168.1.100:8009",
+            chromecast_obj=None,
+        )
+        # Fake module so the test does not depend on pychromecast being installed.
+        fake_pychromecast = MagicMock()
+        with patch.dict("sys.modules", {"pychromecast": fake_pychromecast}):
+            mock_get_cc = fake_pychromecast.get_chromecast_from_host
+            mock_cc = mock_get_cc.return_value
+            mock_cc.media_controller = mock_get_cc
+            cast_mgr.cast_to_device(cc_dev, "http://example.com/movie.mp4", "Filme", is_live=False)
+            self.assertTrue(cast_mgr.is_casting)
+            cast_mgr.stop_cast()
+
+        dialog = CastDialog(
+            current_url="http://example.com/test.ts",
+            current_title="Filme Teste",
+            headers={"User-Agent": "Test"},
+            is_live=False,
+        )
+        self.assertIsNotNone(dialog)
+        dialog.close()
+
+    def test_playlist_health_checker_and_widget(self):
+        import tempfile
+
+        from src.core.playlist_health import PlaylistHealthChecker
+        from src.ui.playlist_widget import PlaylistWidget
+
+        checker = PlaylistHealthChecker.get_instance()
+        self.assertIsNotNone(checker)
+
+        # Test Local File Health Check
+        with tempfile.NamedTemporaryFile(suffix=".m3u", delete=False) as f:
+            f.write(b"#EXTM3U\n#EXTINF:-1,Test\nhttp://example.com/live.ts\n")
+            temp_path = f.name
+
+        try:
+            local_pl = {
+                "id": 999,
+                "name": "Local Playlist",
+                "source_type": "m3u",
+                "file_path": temp_path,
+                "is_local": True,
+            }
+            status = checker.check_playlist_sync(local_pl)
+            self.assertEqual(status.status, "local")
+            self.assertEqual(status.playlist_id, 999)
+
+            widget = PlaylistWidget()
+            widget.set_playlists([local_pl])
+            self.assertEqual(widget._list_widget.count(), 1)
+            item_text = widget._list_widget.item(0).text()
+            self.assertIn("Local Playlist", item_text)
+            widget.close()
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
 
 if __name__ == "__main__":

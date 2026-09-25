@@ -30,3 +30,7 @@ keyring>=25.0.0
 
 # Validação de URLs
 validators>=0.22.0
+
+# Transmissão para Chromecast e Smart TVs
+pychromecast>=14.0.0
+zeroconf>=0.150.0

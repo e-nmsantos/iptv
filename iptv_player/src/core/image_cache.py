@@ -1,9 +1,12 @@
 """On-disk cache for remotely-fetched channel/VOD/series artwork."""
 
 import hashlib
+import logging
 import os
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ImageCache:
@@ -26,22 +29,24 @@ class ImageCache:
             return None
         try:
             os.utime(path, None)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("Image cache: failed to touch %s: %s", path, exc)
         return data
 
     def write(self, url: str, data: bytes) -> None:
         path = self._path_for(url)
         try:
             path.write_bytes(data)
-        except OSError:
+        except OSError as exc:
+            logger.debug("Image cache: failed to write %s: %s", path, exc)
             return
         self._evict_if_needed()
 
     def _evict_if_needed(self) -> None:
         try:
             entries = [(p, p.stat()) for p in self._dir.iterdir() if p.is_file()]
-        except OSError:
+        except OSError as exc:
+            logger.debug("Image cache: failed to scan %s: %s", self._dir, exc)
             return
         total = sum(st.st_size for _, st in entries)
         if total <= self._max_bytes:

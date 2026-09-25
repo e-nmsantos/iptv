@@ -4,7 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -48,12 +49,29 @@ class SeekSlider(QSlider):
         return round(self.minimum() + (self.maximum() - self.minimum()) * ratio)
 
 
+class _VideoSurface(QWidget):
+    """Native rendering surface for VLC with clean background painting."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setStyleSheet("background-color: black;")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+
+
 class PlayerWidget(QWidget):
     """Widget containing the video output and playback controls."""
 
     fullscreen_toggled = Signal(bool)
     previous_channel_requested = Signal()
     next_channel_requested = Signal()
+    retry_requested = Signal()
+    skip_backward_requested = Signal()
+    skip_forward_requested = Signal()
 
     def __init__(self, media_player: MediaPlayer, settings=None, parent=None):
         super().__init__(parent)
@@ -61,8 +79,13 @@ class PlayerWidget(QWidget):
         self._settings = settings
         self._is_fullscreen = False
         self._channel_name = ""
+        self._stream_type = "live"
         self._pip_window: Optional[PiPWindow] = None
         self._last_seek_value = -1
+        self._countdown_remaining = 0
+        self._error_countdown_timer = QTimer(self)
+        self._error_countdown_timer.setInterval(1000)
+        self._error_countdown_timer.timeout.connect(self._on_error_countdown_tick)
         self._setup_ui()
         self._connect_signals()
 
@@ -73,8 +96,7 @@ class PlayerWidget(QWidget):
         layout.setSpacing(0)
 
         # Video output area
-        self._video_frame = QWidget()
-        self._video_frame.setStyleSheet("background: #000;")
+        self._video_frame = _VideoSurface(self)
         self._video_frame.setMinimumSize(320, 240)
         self._video_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._video_frame, 1)
@@ -88,7 +110,7 @@ class PlayerWidget(QWidget):
             }}
         """)
         controls_layout = QVBoxLayout(controls_container)
-        controls_layout.setContentsMargins(10, 5, 10, 10)
+        controls_layout.setContentsMargins(10, 5, 10, 8)
         controls_layout.setSpacing(5)
 
         # Progress bar
@@ -120,7 +142,17 @@ class PlayerWidget(QWidget):
         self._next_channel_btn.clicked.connect(self.next_channel_requested.emit)
         btn_layout.addWidget(self._next_channel_btn)
 
-        btn_layout.addSpacing(20)
+        self._skip_back_btn = self._make_button("⏪", "Recuar 10 segundos")
+        self._skip_back_btn.clicked.connect(self._skip_backward)
+        self._skip_back_btn.hide()
+        btn_layout.addWidget(self._skip_back_btn)
+
+        self._skip_forward_btn = self._make_button("⏩", "Avançar 10 segundos")
+        self._skip_forward_btn.clicked.connect(self._skip_forward)
+        self._skip_forward_btn.hide()
+        btn_layout.addWidget(self._skip_forward_btn)
+
+        btn_layout.addSpacing(15)
 
         # Time labels
         self._time_label = QLabel("00:00 / 00:00")
@@ -155,7 +187,7 @@ class PlayerWidget(QWidget):
         self._more_btn.clicked.connect(self._show_more_menu)
         btn_layout.addWidget(self._more_btn)
 
-        self._more_menu = QMenu(self)
+        self._more_menu = QMenu(self.window())
         self._record_action = self._more_menu.addAction("⏺ Gravar canal")
         self._record_action.setCheckable(True)
         self._record_action.triggered.connect(self._toggle_recording)
@@ -181,7 +213,75 @@ class PlayerWidget(QWidget):
         controls_layout.addLayout(btn_layout)
         controls_layout.addWidget(self._channel_info)
 
-        controls_container.setMaximumHeight(90)
+        # Error recovery banner with countdown
+        self._error_banner = QWidget()
+        self._error_banner.setStyleSheet(f"""
+            QWidget {{
+                background: {Palette.BG_ELEVATED};
+                border: 1px solid {Palette.WARNING_AMBER};
+                border-radius: {Palette.RADIUS_MD}px;
+            }}
+        """)
+        error_layout = QHBoxLayout(self._error_banner)
+        error_layout.setContentsMargins(10, 4, 10, 4)
+        error_layout.setSpacing(8)
+
+        self._error_banner_text = QLabel("⚠ Falha na reprodução.")
+        self._error_banner_text.setStyleSheet(
+            f"color: {Palette.WARNING_AMBER}; font-weight: 600; font-size: 11px;"
+        )
+        error_layout.addWidget(self._error_banner_text, 1)
+
+        self._retry_banner_btn = QPushButton("🔄 Tentar novamente")
+        self._retry_banner_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {Palette.ACCENT};
+                color: white;
+                border: none;
+                border-radius: {Palette.RADIUS_SM}px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Palette.ACCENT_HOVER}; }}
+        """)
+        self._retry_banner_btn.clicked.connect(self._on_retry_clicked)
+        error_layout.addWidget(self._retry_banner_btn)
+
+        self._next_banner_btn = QPushButton("⏭ Canal seguinte")
+        self._next_banner_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {Palette.BG_CARD};
+                color: {Palette.TEXT_PRIMARY};
+                border: 1px solid {Palette.BORDER_STRONG};
+                border-radius: {Palette.RADIUS_SM}px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Palette.BG_CARD_HOVER}; }}
+        """)
+        self._next_banner_btn.clicked.connect(self._on_next_channel_clicked)
+        error_layout.addWidget(self._next_banner_btn)
+
+        self._cancel_banner_btn = QPushButton("✕ Cancelar")
+        self._cancel_banner_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {Palette.TEXT_MUTED};
+                border: none;
+                padding: 4px 8px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ color: {Palette.TEXT_PRIMARY}; }}
+        """)
+        self._cancel_banner_btn.clicked.connect(self._on_cancel_error_clicked)
+        error_layout.addWidget(self._cancel_banner_btn)
+
+        controls_layout.addWidget(self._error_banner)
+        self._error_banner.hide()
+
+        controls_container.setMaximumHeight(135)
         layout.addWidget(controls_container)
 
     def _make_button(self, text: str, tooltip: str) -> QPushButton:
@@ -241,9 +341,76 @@ class PlayerWidget(QWidget):
     @Slot()
     def _stop(self):
         """Stop playback."""
+        self.clear_error_banner()
         self._media_player.stop()
         self._play_btn.setText("▶")
         self._channel_info.setText("Parado")
+
+    @Slot()
+    def _skip_backward(self):
+        """Skip backward 10 seconds."""
+        self._media_player.seek_relative(-10)
+
+    @Slot()
+    def _skip_forward(self):
+        """Skip forward 10 seconds."""
+        self._media_player.seek_relative(10)
+
+    def set_stream_type(self, stream_type: str):
+        """Adapt controls layout to live stream or VOD/series."""
+        self._stream_type = stream_type
+        is_live = stream_type == "live"
+        self._previous_channel_btn.setVisible(is_live)
+        self._next_channel_btn.setVisible(is_live)
+        self._skip_back_btn.setVisible(not is_live)
+        self._skip_forward_btn.setVisible(not is_live)
+        self._progress_slider.setVisible(not is_live)
+        if is_live:
+            self._time_label.setText("AO VIVO")
+
+    def show_error_banner(self, message: str, is_live: bool = True):
+        """Show the error banner with automatic countdown for live channels."""
+        self._error_countdown_timer.stop()
+        if is_live:
+            self._countdown_remaining = 5
+            self._next_banner_btn.show()
+            self._error_banner_text.setText(
+                f"⚠ Falha na transmissão. A mudar para o canal seguinte em {self._countdown_remaining}s..."
+            )
+            self._error_countdown_timer.start()
+        else:
+            self._next_banner_btn.hide()
+            self._error_banner_text.setText(f"⚠ Falha na reprodução: {message}")
+        self._error_banner.show()
+
+    def _on_error_countdown_tick(self):
+        self._countdown_remaining -= 1
+        if self._countdown_remaining <= 0:
+            self._error_countdown_timer.stop()
+            self._error_banner.hide()
+            self.next_channel_requested.emit()
+        else:
+            self._error_banner_text.setText(
+                f"⚠ Falha na transmissão. A mudar para o canal seguinte em {self._countdown_remaining}s..."
+            )
+
+    def _on_retry_clicked(self):
+        self._error_countdown_timer.stop()
+        self._error_banner.hide()
+        self.retry_requested.emit()
+
+    def _on_next_channel_clicked(self):
+        self._error_countdown_timer.stop()
+        self._error_banner.hide()
+        self.next_channel_requested.emit()
+
+    def _on_cancel_error_clicked(self):
+        self._error_countdown_timer.stop()
+        self._error_banner.hide()
+
+    def clear_error_banner(self):
+        self._error_countdown_timer.stop()
+        self._error_banner.hide()
 
     @Slot(int)
     def _on_seek(self, value: int):
@@ -263,7 +430,7 @@ class PlayerWidget(QWidget):
         self._volume_slider.setValue(max(0, min(100, int(value))))
 
     def _show_audio_menu(self):
-        menu = QMenu(self)
+        menu = QMenu(self.window())
         tracks = self._media_player.get_audio_tracks()
         if not tracks:
             menu.addAction("Nenhuma faixa disponível").setEnabled(False)
@@ -272,7 +439,7 @@ class PlayerWidget(QWidget):
         menu.exec(self._audio_btn.mapToGlobal(self._audio_btn.rect().bottomLeft()))
 
     def _show_subtitle_menu(self):
-        menu = QMenu(self)
+        menu = QMenu(self.window())
         tracks = self._media_player.get_subtitle_tracks()
         selected_track = self._media_player.get_subtitle_track()
         disable = menu.addAction("Desativar")
@@ -289,13 +456,29 @@ class PlayerWidget(QWidget):
                 lambda checked=False, value=track_id: self._media_player.set_subtitle_track(value)
             )
         menu.addSeparator()
-        add_file = menu.addAction("Adicionar ficheiro de legendas…")
+        search_online = menu.addAction("🔍 Procurar legendas online (OpenSubtitles)…")
+        search_online.triggered.connect(self._search_subtitles_online)
+        sync_delay = menu.addAction("⏱️ Sincronização de legendas (+/- ms)…")
+        sync_delay.triggered.connect(self._show_subtitle_delay_dialog)
+        add_file = menu.addAction("Adicionar ficheiro local de legendas…")
         add_file.triggered.connect(self._add_subtitle_file)
         menu.exec(self._subtitle_btn.mapToGlobal(self._subtitle_btn.rect().bottomLeft()))
 
+    def _search_subtitles_online(self):
+        from .dialogs import SubtitleSearchDialog
+        current_title = self._channel_name or ""
+        dialog = SubtitleSearchDialog(initial_query=current_title, parent=self.window())
+        if dialog.exec() == dialog.DialogCode.Accepted and dialog.selected_file_path:
+            self._media_player.add_subtitle_file(dialog.selected_file_path)
+
+    def _show_subtitle_delay_dialog(self):
+        from .dialogs import SubtitleDelayDialog
+        dialog = SubtitleDelayDialog(self._media_player, parent=self.window())
+        dialog.exec()
+
     def _add_subtitle_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self,
+            self.window(),
             "Adicionar legendas",
             "",
             "Legendas (*.srt *.ass *.ssa *.sub *.vtt);;Todos os ficheiros (*)",
@@ -324,6 +507,7 @@ class PlayerWidget(QWidget):
     def _on_state_changed(self, state: str):
         """Update UI based on player state."""
         if state == "playing":
+            self.clear_error_banner()
             self._play_btn.setText("⏸")
             if self._channel_name:
                 self._channel_info.setText(f"A reproduzir: {self._channel_name}")
@@ -345,6 +529,7 @@ class PlayerWidget(QWidget):
         """Handle player errors."""
         self._channel_info.setText(f"⚠ Erro: {message}")
         self._play_btn.setText("▶")
+        self.show_error_banner(message, is_live=self._stream_type == "live")
 
     @Slot()
     def _toggle_fullscreen(self):

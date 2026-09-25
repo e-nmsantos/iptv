@@ -13,8 +13,8 @@ from PySide6.QtWidgets import QWidget
 logger = logging.getLogger(__name__)
 
 # Watchdog timing (polled every 500ms by _update_timer).
-_LIVE_BUFFER_WATCHDOG_TICKS = 16     # ~8s of continuous VLC buffering -> retry
-_LIVE_STALL_WATCHDOG_TICKS = 20      # ~10s of frozen picture while "Playing" -> retry
+_LIVE_BUFFER_WATCHDOG_TICKS = 30     # ~15s of continuous VLC buffering -> retry
+_LIVE_STALL_WATCHDOG_TICKS = 30      # ~15s of frozen picture while "Playing" -> retry
 _STABLE_RESET_TICKS = 30             # ~15s of stable playback -> restore retry budget
 _SEEK_TOLERANCE_MS = 2500
 _MAX_SEEK_RETRIES = 6
@@ -48,6 +48,8 @@ class MediaPlayer(QObject):
         video_widget: Optional[QWidget] = None,
         vlc_path: str = "",
         buffer_size_ms: int = 5000,
+        deinterlace: bool = True,
+        normalize_audio: bool = True,
     ):
         super().__init__()
         self._video_widget = video_widget
@@ -71,6 +73,8 @@ class MediaPlayer(QObject):
         self._current_headers: dict = {}
         self._current_is_live = False
         self._buffer_size_ms = max(300, min(10000, int(buffer_size_ms)))
+        self._deinterlace = bool(deinterlace)
+        self._normalize_audio = bool(normalize_audio)
         self._is_recording = False
         self._recording_path = ""
         self._buffering_events = 0
@@ -78,6 +82,9 @@ class MediaPlayer(QObject):
         self._seek_retry_count = 0
         self._requested_subtitle_track: Optional[int] = None
         self._subtitle_retry_count = 0
+        self._current_renderer = None
+        self._active_cast_ip = None
+        self._active_cast_sout = None
 
         # Auto-detect VLC installation path
         if not vlc_path:
@@ -125,6 +132,8 @@ class MediaPlayer(QObject):
             "--clock-synchro=0",
             "--cr-average=1000",
         ]
+        if getattr(self, "_normalize_audio", True):
+            vlc_args.extend(["--audio-filter=normvol", "--norm-max-level=2.0"])
 
         try:
             if vlc_path and os.path.isfile(vlc_path):
@@ -140,11 +149,9 @@ class MediaPlayer(QObject):
                 self._instance = vlc.Instance(vlc_args)
         except Exception as e:
             logger.warning("VLC initialization warning: %s", e)
-            # Try with minimal options
             try:
                 self._instance = vlc.Instance(["--quiet", "--no-video-title-show"])
             except Exception:
-                # Last resort - try without any options
                 try:
                     self._instance = vlc.Instance()
                 except Exception as e3:
@@ -171,6 +178,93 @@ class MediaPlayer(QObject):
         if self._player:
             self._embed_video_widget(widget)
 
+    def set_deinterlace(self, enabled: bool, mode: str = "yadif"):
+        """Enable or disable deinterlacing at runtime."""
+        self._deinterlace = bool(enabled)
+        if self._player:
+            try:
+                self._player.video_set_deinterlace(mode if enabled else "")
+            except Exception:
+                pass
+
+    def is_deinterlace_enabled(self) -> bool:
+        return self._deinterlace
+
+    def is_normalize_audio_enabled(self) -> bool:
+        return self._normalize_audio
+
+    @property
+    def vlc_instance(self) -> Optional[vlc.Instance]:
+        """Return the underlying VLC Instance (for casting and renderer discovery)."""
+        return self._instance
+
+    def set_renderer(self, renderer_item) -> bool:
+        """Direct playback output to a Chromecast / DLNA renderer."""
+        self._current_renderer = renderer_item
+        if self._player and renderer_item:
+            try:
+                res = self._player.set_renderer(renderer_item)
+                logger.info("Set renderer on VLC player, result=%s", res)
+                return res == 0
+            except Exception as ex:
+                logger.warning("Failed to set renderer: %s", ex)
+        return False
+
+    def clear_renderer(self) -> bool:
+        """Reset playback output to the local PC display."""
+        self._current_renderer = None
+        if self._player:
+            try:
+                res = self._player.set_renderer(None)
+                logger.info("Cleared renderer on VLC player, result=%s", res)
+                return res == 0
+            except Exception as ex:
+                logger.warning("Failed to clear renderer: %s", ex)
+        return False
+
+    def get_renderer(self):
+        """Return the currently attached VLC renderer, if any."""
+        return getattr(self, "_current_renderer", None)
+
+    def has_renderer(self) -> bool:
+        """Return True if playback is currently directed to a renderer."""
+        return getattr(self, "_current_renderer", None) is not None
+
+    def set_cast_target(self, host_ip: str) -> bool:
+        """Stream playback directly to a Chromecast via VLC sout."""
+        clean_ip = host_ip.split(":")[0].strip()
+        if not clean_ip:
+            return False
+        self._active_cast_ip = clean_ip
+        self._active_cast_sout = f":sout=#chromecast{{ip={clean_ip}}}"
+        logger.info("Directing playback to Chromecast at %s", clean_ip)
+        if self._current_url and self._player:
+            self.play(
+                url=self._current_url,
+                custom_headers=self._current_headers,
+                is_live=self._current_is_live,
+                extra_sout=self._active_cast_sout,
+            )
+        return True
+
+    def clear_cast_target(self) -> bool:
+        """Return playback from Chromecast back to local PC screen."""
+        if not getattr(self, "_active_cast_sout", None):
+            return False
+        self._active_cast_ip = None
+        self._active_cast_sout = None
+        logger.info("Cleared Chromecast cast target, returning to local display")
+        if self._current_url and self._player:
+            self.play(
+                url=self._current_url,
+                custom_headers=self._current_headers,
+                is_live=self._current_is_live,
+            )
+        return True
+
+    def is_casting_active(self) -> bool:
+        return bool(getattr(self, "_active_cast_sout", None))
+
     def play(
         self,
         url: str = "",
@@ -196,9 +290,6 @@ class MediaPlayer(QObject):
         if url:
             self._current_url = url
             if not self._retrying:
-                retry_timer = getattr(self, "_retry_timer", None)
-                if retry_timer:
-                    retry_timer.stop()
                 self._retry_scheduled = False
                 self._retry_count = 0
                 self._stable_playback_ticks = 0
@@ -362,9 +453,9 @@ class MediaPlayer(QObject):
         self._buffer_size_ms = max(300, min(10000, int(buffer_size_ms)))
 
     def _effective_cache_ms(self) -> int:
-        """Live streams need enough headroom for normal IPTV jitter."""
+        """Live streams respect configured buffer setting with a sensible floor."""
         if self._current_is_live:
-            return max(5000, self._buffer_size_ms)
+            return max(500, self._buffer_size_ms)
         return self._buffer_size_ms
 
     def reinitialize(self, vlc_path: str = "", buffer_size_ms: Optional[int] = None):
@@ -483,14 +574,76 @@ class MediaPlayer(QObject):
     def add_subtitle_file(self, file_path: str) -> bool:
         if not self._player:
             return False
+        resolved_path = str(Path(file_path).resolve())
         uri = Path(file_path).resolve().as_uri()
-        added = self._player.add_slave(vlc.MediaSlaveType.subtitle, uri, True) == 0
+        added = False
+        if hasattr(self._player, "video_set_subtitle_file"):
+            try:
+                res = self._player.video_set_subtitle_file(resolved_path)
+                if res in (0, 1, True, None):
+                    added = True
+            except Exception as e:
+                logger.debug("video_set_subtitle_file error: %s", e)
+        if not added and hasattr(self._player, "add_slave"):
+            try:
+                added = self._player.add_slave(vlc.MediaSlaveType.subtitle, uri, True) == 0
+            except Exception as e:
+                logger.debug("add_slave error: %s", e)
         if added:
-            # ``b_select=True`` asks VLC to activate the new slave. Do not let a
-            # previously requested embedded track override it on the next poll.
             self._requested_subtitle_track = None
             self._subtitle_retry_count = 0
+            try:
+                tracks = self._player.video_get_spu_description() or []
+                if tracks:
+                    last_id = tracks[-1][0]
+                    if last_id > 0:
+                        self._player.video_set_spu(last_id)
+            except Exception:
+                pass
         return added
+
+    def set_subtitle_delay(self, delay_ms: int) -> bool:
+        """Set subtitle synchronization offset in milliseconds."""
+        self._subtitle_delay_ms = int(delay_ms)
+        if not self._player:
+            return False
+        try:
+            # LibVLC takes delay in microseconds (int64_t)
+            ret = self._player.video_set_spu_delay(int(self._subtitle_delay_ms * 1000))
+            return ret in (0, None)
+        except Exception as e:
+            logger.debug("video_set_spu_delay error: %s", e)
+            return False
+
+    def get_subtitle_delay(self) -> int:
+        """Get current subtitle synchronization offset in milliseconds."""
+        if self._player:
+            try:
+                vlc_delay = self._player.video_get_spu_delay()
+                if vlc_delay is not None and vlc_delay != 0:
+                    return int(vlc_delay / 1000)
+            except Exception:
+                pass
+        return getattr(self, "_subtitle_delay_ms", 0)
+
+    def set_night_mode(self, enabled: bool) -> None:
+        """Enable speech clarity / night mode equalizer boost on vocal frequencies."""
+        self._night_mode_enabled = bool(enabled)
+        if self._player and hasattr(vlc, "AudioEqualizer"):
+            try:
+                eq = vlc.AudioEqualizer()
+                if self._night_mode_enabled:
+                    eq.set_amp_at_index(0, -4.0)
+                    eq.set_amp_at_index(1, -2.0)
+                    eq.set_amp_at_index(4, 3.0)
+                    eq.set_amp_at_index(5, 5.0)
+                    eq.set_amp_at_index(6, 4.0)
+                self._player.set_equalizer(eq)
+            except Exception:
+                pass
+
+    def is_night_mode_enabled(self) -> bool:
+        return getattr(self, "_night_mode_enabled", False)
 
     @property
     def is_playing(self) -> bool:

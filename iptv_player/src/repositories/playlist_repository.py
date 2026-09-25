@@ -9,7 +9,9 @@ class PlaylistRepository:
     def all(self) -> list[dict]:
         with self._connections() as conn:
             rows = conn.execute(
-                """SELECT id, name, source_type, url, created_at, updated_at
+                """SELECT id, name, source_type, url, file_path, server_url,
+                          username, password, mac_address, epg_source, epg_url,
+                          created_at, updated_at
                    FROM playlists ORDER BY updated_at DESC"""
             ).fetchall()
         return [self._decrypt_row(dict(row)) for row in rows]

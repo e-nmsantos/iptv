@@ -21,7 +21,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from src.ui.theme import build_stylesheet
-from src.utils.logger import setup_logger
+from src.utils.logger import log_file_path, setup_logger
 
 logger = setup_logger()
 
@@ -35,7 +35,10 @@ def global_exception_hook(exctype, value, traceback):
     error_msg = "".join(tb.format_exception(exctype, value, traceback))
     details = (
         "Ocorreu um erro inesperado e a aplicação precisa de fechar.\n\n"
-        f"Por favor, reporte este erro.\n\nDetalhes:\n{error_msg}"
+        f"Registo: {log_file_path()}\n"
+        "Usa Ajuda → 'Guardar relatório de diagnóstico...' para gerar um "
+        "relatório completo que podes anexar ao pedido de ajuda.\n\n"
+        f"Detalhes:\n{error_msg}"
     )
     QMessageBox.critical(None, "Erro Crítico da Aplicação", details)
     sys.exit(1)

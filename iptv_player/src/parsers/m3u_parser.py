@@ -1,8 +1,10 @@
 """M3U / M3U8 / M3U_Plus playlist parser."""
 
+import gzip
 import json
 import re
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -10,6 +12,7 @@ from urllib.parse import unquote, urlparse
 import requests
 
 from ..core.channel import Channel
+from ..core.http_client import RequestCancelled
 from ..core.playlist import Playlist
 
 
@@ -25,11 +28,19 @@ class M3UParser:
 
     MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
-    def __init__(self, timeout: int = 30, user_agent: str = ""):
+    def __init__(
+        self,
+        timeout: int = 30,
+        user_agent: str = "",
+        should_cancel: Optional[Callable[[], bool]] = None,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+        **kwargs,
+    ):
         self._timeout = max(5, int(timeout))
         self._user_agent = user_agent or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
+        self._should_cancel = should_cancel or cancel_requested
 
     @staticmethod
     def is_m3u(content: str) -> bool:
@@ -63,9 +74,15 @@ class M3UParser:
             "tvg-name": "tvg_name",
             "tvg-logo": "tvg_logo",
             "group-title": "group",
-            "tvg-chno": "epg_channel_id",
             "radio": None,
         }
+
+        chno_match = re.search(r'tvg-chno="?(\d+)"?', extinf_line, re.IGNORECASE)
+        if chno_match:
+            try:
+                info["channel_number"] = int(chno_match.group(1))
+            except ValueError:
+                info["channel_number"] = 0
 
         for attr, key in attrs.items():
             if key is None:
@@ -239,12 +256,23 @@ class M3UParser:
         if path.stat().st_size > self.MAX_DOWNLOAD_BYTES:
             raise ValueError("A playlist excede o limite de 100 MB.")
 
-        content = path.read_text(encoding="utf-8", errors="replace")
-        playlist_name = name or path.stem
+        raw = path.read_bytes()
+        if str(file_path).lower().endswith(".gz") or raw.startswith(b"\x1f\x8b"):
+            raw = gzip.decompress(raw)
+        content = raw.decode("utf-8", errors="replace")
+        clean_name = path.name
+        if clean_name.lower().endswith(".gz"):
+            clean_name = clean_name[:-3]
+        if clean_name.lower().endswith((".m3u", ".m3u8")):
+            clean_name = Path(clean_name).stem
+        playlist_name = name or clean_name or path.stem
         return self._parse_content(content, playlist_name, file_path=str(path))
 
     def _parse_content(self, content: str, name: str, url: str = "", file_path: str = "") -> Playlist:
         """Parse M3U content string into a Playlist object."""
+        if self._should_cancel and self._should_cancel():
+            raise RequestCancelled("A operação foi cancelada.")
+
         if not self.is_m3u(content):
             raise ValueError("Invalid M3U format: content must start with #EXTM3U")
 
@@ -271,6 +299,8 @@ class M3UParser:
         lines = content.split("\n")
         i = 0
         while i < len(lines):
+            if self._should_cancel and self._should_cancel():
+                raise RequestCancelled("A operação foi cancelada.")
             line = lines[i].strip()
 
             if line.startswith("#EXTINF:"):
@@ -281,7 +311,11 @@ class M3UParser:
                 url_line = ""
                 for j in range(i + 1, len(lines)):
                     next_line = lines[j].strip()
-                    if next_line.lower().startswith("#extvlcopt:"):
+                    if next_line.upper().startswith("#EXTGRP:"):
+                        grp = next_line.split(":", 1)[1].strip()
+                        if grp:
+                            channel_info["group"] = grp
+                    elif next_line.lower().startswith("#extvlcopt:"):
                         option = next_line.split(":", 1)[1]
                         key, separator, value = option.partition("=")
                         if separator:
@@ -339,6 +373,7 @@ class M3UParser:
                             channel_info.get("duration"),
                         ),
                         source="m3u",
+                        channel_number=channel_info.get("channel_number", 0),
                     )
                     # Determine stream type from URL extension
                     ext = url_line.rsplit(".", 1)[-1].lower() if "." in url_line else ""
