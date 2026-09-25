@@ -184,10 +184,12 @@ class PlaylistSwitchingAndOptimizationTests(unittest.TestCase):
     def setUp(self):
         from src.core.channel import Channel
         from src.core.database import DatabaseManager
+        from src.core.secrets import SecretStore
         self.Channel = Channel
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test.db"
-        self.db = DatabaseManager(db_path=self.db_path)
+        # Test key: CI Linux runners have no system keyring backend.
+        self.db = DatabaseManager(db_path=self.db_path, secret_store=SecretStore.for_tests())
 
     def tearDown(self):
         self.temp_dir.cleanup()
