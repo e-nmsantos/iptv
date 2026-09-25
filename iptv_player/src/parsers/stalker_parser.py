@@ -41,7 +41,16 @@ class StalkerParser:
     4. POST {portal}/server/load.php  -> get_all_channels
     """
 
-    def __init__(self, portal_url: str, mac_address: str, timeout: int = 30):
+    USER_AGENT = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG425 STBw3 firmware ver=2.31.0"
+
+    def __init__(
+        self,
+        portal_url: str,
+        mac_address: str,
+        timeout: int = 30,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+        **kwargs,
+    ):
         self._portal_url = self._normalize_url(portal_url)
         self._mac = self._normalize_mac(mac_address)
         self._mac_clean = self._mac.lower().replace(":", "")
@@ -49,10 +58,15 @@ class StalkerParser:
         self._profile: dict = {}
         self._genre_map: dict = {}
         self._timeout = max(5, int(timeout))
+        self._cancel_requested = cancel_requested or (lambda: False)
 
-        self._session = HttpSession(timeout=self._timeout)
+        self._session = HttpSession(
+            timeout=self._timeout,
+            retry_methods=frozenset({"POST", "GET", "HEAD", "OPTIONS"}),
+            cancel_requested=self._cancel_requested,
+        )
         self._session.headers.update({
-            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG425 STBw3 firmware ver=2.31.0",
+            "User-Agent": self.USER_AGENT,
             "Accept": "*/*",
             "Accept-Language": "en",
             "X-User-Agent": "Model: MAG425; Link: WiFi",
@@ -63,12 +77,21 @@ class StalkerParser:
         """Release pooled HTTP connections held by this client."""
         self._session.close()
 
+    @classmethod
+    def playback_headers_for(cls, portal_url: str) -> dict[str, str]:
+        """Return the public headers required by Stalker playback requests."""
+        url = str(portal_url or "").strip()
+        referer = url if url.rstrip("/").endswith("/c") else f"{url.rstrip('/')}/c/"
+        if not referer.endswith("/"):
+            referer += "/"
+        return {
+            "User-Agent": cls.USER_AGENT,
+            "Referer": referer,
+        }
+
     def playback_headers(self) -> dict[str, str]:
         """Return the public headers required by Stalker playback requests."""
-        return {
-            "User-Agent": self._session.headers.get("User-Agent", ""),
-            "Referer": f"{self._portal_url}/c/",
-        }
+        return self.playback_headers_for(self._portal_url)
 
     def __enter__(self):
         return self
@@ -816,6 +839,15 @@ class StalkerParser:
         resolved_cmd = js_data.get("cmd", "") if isinstance(js_data, dict) else ""
         url = self._extract_url_from_cmd(resolved_cmd)
         if not url:
+            # Reauthenticate and retry once in case token expired
+            self.authenticate()
+            data["token"] = self._token
+            resp = self._post(data)
+            result = self._parse_response(resp)
+            js_data = result.get("js", result)
+            resolved_cmd = js_data.get("cmd", "") if isinstance(js_data, dict) else ""
+            url = self._extract_url_from_cmd(resolved_cmd)
+        if not url:
             raise ConnectionError(
                 "O portal Stalker não devolveu um URL de reprodução válido "
                 "para este conteúdo."
@@ -830,6 +862,57 @@ class StalkerParser:
         server-side identifiers and must be exchanged for a short-lived
         public URL immediately before playback.
         """
+        clean_cmd = str(cmd or "").strip()
+        stream_match = re.search(r'[?&]stream=(\d+)', clean_cmd)
+        if stream_match:
+            clean_cmd = f"http://localhost/ch/{stream_match.group(1)}"
+
+        if not self._token:
+            self.authenticate()
+
+        def _do_resolve(token_str: str) -> str:
+            nonce = self._generate_nonce()
+            data = {
+                "type": "itv",
+                "action": "create_link",
+                "token": token_str,
+                "mac": self._mac,
+                "JsHttpRequest": f"1-xml:{nonce}",
+                "cmd": clean_cmd,
+                "series": "",
+                "forced_storage": "undefined",
+                "disable_ad": "0",
+                "download": "0",
+            }
+            resp = self._post(data)
+            result = self._parse_response(resp)
+            js_data = result.get("js", result)
+            resolved_cmd = js_data.get("cmd", "") if isinstance(js_data, dict) else ""
+            extracted_url = self._extract_url_from_cmd(resolved_cmd)
+            if extracted_url and re.search(r'[?&]stream=(?:&|$)', extracted_url):
+                return ""
+            return extracted_url or ""
+
+        url = _do_resolve(self._token)
+        if not url:
+            # Reauthenticate once and retry
+            self.authenticate()
+            url = _do_resolve(self._token)
+
+        if not url:
+            raise ConnectionError(
+                "O portal Stalker não devolveu um link temporário válido "
+                "para o canal."
+            )
+        return url
+
+    def resolve_catchup_link(
+        self,
+        cmd: str,
+        start_timestamp: int,
+        duration_seconds: int,
+    ) -> str:
+        """Resolve a catchup/timeshift recording link for a Stalker channel."""
         if not self._token:
             self.authenticate()
 
@@ -845,6 +928,10 @@ class StalkerParser:
             "forced_storage": "undefined",
             "disable_ad": "0",
             "download": "0",
+            "archive": "1",
+            "archive_type": "1",
+            "start": str(int(start_timestamp)),
+            "end": str(int(start_timestamp + duration_seconds)),
         }
         resp = self._post(data)
         result = self._parse_response(resp)
@@ -853,8 +940,7 @@ class StalkerParser:
         url = self._extract_url_from_cmd(resolved_cmd)
         if not url:
             raise ConnectionError(
-                "O portal Stalker não devolveu um link temporário válido "
-                "para o canal."
+                "O portal Stalker não devolveu um link de gravação/catchup válido."
             )
         return url
 

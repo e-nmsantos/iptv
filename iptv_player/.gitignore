@@ -15,3 +15,7 @@ dist/
 *.log
 .DS_Store
 
+
+# Locally built Android packages (publish via CI artifacts instead)
+*.apk
+*.aab

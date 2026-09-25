@@ -41,13 +41,27 @@ class CatalogDatabase(context: Context) :
         if (oldVersion < 3) createPlaybackProgressTable(db)
         if (oldVersion < 4) createCatalogSearch(db)
         if (oldVersion < 5) {
-            db.execSQL("ALTER TABLE channels ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
+            // oldVersion < 2 already rebuilds "channels" via the current createChannelsTable(),
+            // which has included content_hash since that column's default value was added below.
+            // Devices jumping straight from version 1 to 6 must not add it a second time here.
+            if (!hasColumn(db, "channels", "content_hash")) {
+                db.execSQL("ALTER TABLE channels ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
+            }
             db.execSQL("CREATE INDEX IF NOT EXISTS channels_differential ON channels(playlist_id, stream_type, tvg_id, name)")
             db.execSQL("CREATE INDEX IF NOT EXISTS playback_progress_playlist ON playback_progress(playlist_id)")
             createCatalogSearch(db)
         }
         if (oldVersion < 6) createEpgTable(db)
     }
+
+    private fun hasColumn(db: SQLiteDatabase, table: String, column: String): Boolean =
+        db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIndex) == column) return@use true
+            }
+            false
+        }
 
     private fun createPlaylistsTable(db: SQLiteDatabase) {
         db.execSQL(
@@ -278,7 +292,9 @@ class CatalogDatabase(context: Context) :
         offset: Int,
         limit: Int,
     ): CatalogPage {
-        require(offset >= 0 && limit in 1..500) { "Página de catálogo inválida." }
+        // No artificial ceiling: "Todos" and the in-player guide intentionally request every
+        // channel in one page, and some playlists run to tens of thousands of channels.
+        require(offset >= 0 && limit > 0) { "Página de catálogo inválida." }
         val db = readableDatabase
         val clauses = mutableListOf("c.playlist_id = ?", "c.stream_type = ?")
         val args = mutableListOf(playlistId.toString(), type.name)
@@ -315,7 +331,7 @@ class CatalogDatabase(context: Context) :
         db.rawQuery(
             """SELECT c.id, c.name, c.group_name, c.logo, c.tvg_id, c.stream_type, c.quality, c.favorite
                 FROM $from WHERE $where
-                ORDER BY c.group_name COLLATE NOCASE, c.name COLLATE NOCASE, c.id
+                ORDER BY c.name COLLATE NOCASE, c.id
                 LIMIT ? OFFSET ?""".trimIndent(),
             (args + limit.toString() + offset.toString()).toTypedArray(),
         ).use { cursor ->
@@ -505,6 +521,29 @@ class CatalogDatabase(context: Context) :
                 val channelId = cursor.getString(0)
                 val items = result.getOrPut(channelId) { mutableListOf() }
                 if (items.size < 2) items += pt.iptvplayer.tv.model.EpgProgram(
+                    channelId, cursor.getString(1), cursor.getLong(2), cursor.getLong(3),
+                    cursor.getString(4), cursor.getString(5), cursor.getString(6),
+                )
+            }
+        }
+        return result
+    }
+
+    /** Like [currentAndNextEpg] but returns every programme in an arbitrary window, for the EPG grid. */
+    @Synchronized
+    fun epgWindow(fromMillis: Long, toMillis: Long): Map<String, List<pt.iptvplayer.tv.model.EpgProgram>> {
+        val playlistId = activePlaylistId() ?: return emptyMap()
+        val result = linkedMapOf<String, MutableList<pt.iptvplayer.tv.model.EpgProgram>>()
+        readableDatabase.rawQuery(
+            """SELECT channel_id, title, start_millis, stop_millis, description, category, catchup_url
+                FROM epg_programmes
+                WHERE playlist_id = ? AND stop_millis > ? AND start_millis < ?
+                ORDER BY channel_id, start_millis""".trimIndent(),
+            arrayOf(playlistId.toString(), fromMillis.toString(), toMillis.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val channelId = cursor.getString(0)
+                result.getOrPut(channelId) { mutableListOf() } += pt.iptvplayer.tv.model.EpgProgram(
                     channelId, cursor.getString(1), cursor.getLong(2), cursor.getLong(3),
                     cursor.getString(4), cursor.getString(5), cursor.getString(6),
                 )

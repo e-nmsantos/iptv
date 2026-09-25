@@ -12,6 +12,13 @@ class EpgController:
         self._settings = settings
 
     @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Strip quality tags (HD, FHD, 4K) and punctuation for smart EPG matching."""
+        import re
+        clean = re.sub(r"\b(fhd|hd|4k|uhd|sd|1080p|720p|hevc|h265|raw)\b", "", str(name), flags=re.IGNORECASE)
+        return re.sub(r"[\W_]+", "", clean).casefold()
+
+    @staticmethod
     def channel_maps(channels: list) -> tuple[dict, dict]:
         canonical = {}
         names = {}
@@ -22,7 +29,17 @@ class EpgController:
             if channel_id:
                 channel_id = str(channel_id)
                 canonical[channel_id.casefold()] = channel_id
+                if getattr(channel, "tvg_name", ""):
+                    canonical[channel.tvg_name.casefold()] = channel_id
+                norm_name = EpgController._normalize_name(channel.name)
+                if norm_name:
+                    canonical[norm_name] = channel_id
                 names[channel_id] = channel.name
+            elif channel.name:
+                norm_name = EpgController._normalize_name(channel.name)
+                if norm_name:
+                    canonical[norm_name] = channel.name
+                names[channel.name] = channel.name
         return canonical, names
 
     def cached(self, playlist_id: int, channel_id: str = "") -> list:
@@ -52,7 +69,7 @@ class EpgController:
         canonical, _ = self.channel_maps(channels)
         programs = []
         for source_id, source_programs in epg.channels.items():
-            target_id = canonical.get(source_id.casefold())
+            target_id = canonical.get(source_id.casefold()) or canonical.get(self._normalize_name(source_id))
             if not target_id:
                 continue
             programs.extend(

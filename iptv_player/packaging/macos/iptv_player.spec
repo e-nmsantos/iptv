@@ -1,10 +1,15 @@
 # PyInstaller spec for building the macOS .app bundle.
 # Must be run on macOS: `pyinstaller packaging/macos/iptv_player.spec` from the project root.
 import os
+import re
 
 block_cipher = None
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(SPEC), "..", ".."))
 ICON_PATH = os.path.join(PROJECT_ROOT, "packaging", "macos", "icon.icns")
+
+# Single version source shared with the app (config/__init__.py).
+with open(os.path.join(PROJECT_ROOT, "config", "__init__.py"), encoding="utf-8") as _f:
+    APP_VERSION = re.search(r'^APP_VERSION = "([^"]+)"', _f.read(), re.M).group(1)
 
 a = Analysis(
     [os.path.join(PROJECT_ROOT, "main.py")],
@@ -138,8 +143,8 @@ app = BUNDLE(
         "CFBundleName": "IPTV Player",
         "CFBundleDisplayName": "IPTV Player",
         "CFBundleIdentifier": "local.iptvplayer.app",
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleVersion": "1.0.0",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
         "CFBundleExecutable": "IPTV Player",
         "CFBundlePackageType": "APPL",
         "CFBundleInfoDictionaryVersion": "6.0",

@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 
+from ..core.content_types import STREAM_TYPES_BY_CONTENT
 from ..core.providers import CatalogKind
 from ..parsers.m3u_parser import M3UParser
 
@@ -32,8 +33,9 @@ class CatalogController:
             parsed = M3UParser(
                 timeout=self._settings.get("network_timeout_seconds", 30),
                 user_agent=self._settings.get("user_agent", ""),
+                should_cancel=should_cancel,
             ).parse(source, playlist.get("name"))
-            accepted = ("vod", "movie") if kind == CatalogKind.VOD else (kind.value,)
+            accepted = STREAM_TYPES_BY_CONTENT.get(kind.value, (kind.value,))
             channels = [item for item in parsed.channels if item.stream_type in accepted]
         else:
             channels = self._providers.call_provider(

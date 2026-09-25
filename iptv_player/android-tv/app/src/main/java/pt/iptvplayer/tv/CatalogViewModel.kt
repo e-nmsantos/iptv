@@ -18,35 +18,11 @@ import pt.iptvplayer.tv.data.CatalogDatabase
 import pt.iptvplayer.tv.data.CatalogRepository
 import pt.iptvplayer.tv.data.room.RoomCatalogDatabase
 import pt.iptvplayer.tv.model.Channel
-import pt.iptvplayer.tv.model.EpgProgram
 import pt.iptvplayer.tv.model.PlaylistSummary
 import pt.iptvplayer.tv.model.StreamType
 import pt.iptvplayer.tv.pairing.PairingCoordinator
 import pt.iptvplayer.tv.pairing.PairingPayload
 import pt.iptvplayer.tv.pairing.PairingSourceType
-
-data class CatalogUiState(
-    val playlistName: String = "IPTV Player TV",
-    val channels: List<Channel> = emptyList(),
-    val selectedType: StreamType = StreamType.LIVE,
-    val selectedGroup: String = "Todos",
-    val query: String = "",
-    val loading: Boolean = true,
-    val error: String? = null,
-    val pairingUrl: String? = null,
-    val pairingExpiresAtMillis: Long = 0,
-    val pairingMessage: String? = null,
-    val seriesTitle: String? = null,
-    val seriesEpisodes: List<Channel> = emptyList(),
-    val seriesLoading: Boolean = false,
-    val playlists: List<PlaylistSummary> = emptyList(),
-    val epg: Map<String, List<EpgProgram>> = emptyMap(),
-    val epgLoading: Boolean = false,
-    val availableGroups: List<String> = listOf("Todos"),
-    val totalChannels: Int = 0,
-    val hasMoreChannels: Boolean = false,
-    val homeFavorites: List<Channel> = emptyList(),
-)
 
 class CatalogViewModel(application: Application) : AndroidViewModel(application) {
     private val roomDatabase = RoomCatalogDatabase.build(application)
@@ -54,6 +30,7 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
     private val pairing = PairingCoordinator(application, viewModelScope)
     private var playbackJob: Job? = null
     private var catalogJob: Job? = null
+    private var epgWindowJob: Job? = null
     private var currentEpgUrl: String = ""
     private val requestedCatalogs = mutableSetOf<StreamType>()
     private var loadedLimit = CatalogRepository.PAGE_SIZE
@@ -100,12 +77,14 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
     fun setQuery(query: String) {
         mutableState.update { it.copy(query = query, selectedGroup = "Todos") }
         loadCatalogPage(reset = true)
+        mutableState.update { it.copy(query = query) }
     }
 
     fun loadNextCatalogPage() {
         if (!mutableState.value.hasMoreChannels) return
         loadedLimit += CatalogRepository.PAGE_SIZE
         loadCatalogPage(reset = false)
+        // Catálogo completo carregado em memória por tipo
     }
     fun clearError() = mutableState.update { it.copy(error = null) }
 
@@ -138,28 +117,22 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
     fun selectPlaylist(id: Long) {
         if (mutableState.value.playlists.firstOrNull { it.id == id }?.active == true) return
         mutableState.update { it.copy(loading = true, error = null) }
-        viewModelScope.launch {
-            runCatching { repository.selectPlaylist(id) }
-                .onSuccess { applyPlaylist(it, repository.playlists()) }
-                .onFailure(::showError)
+        launch {
+            applyPlaylist(repository.selectPlaylist(id), repository.playlists())
         }
     }
 
     fun refreshPlaylist() {
         mutableState.update { it.copy(loading = true, error = null) }
-        viewModelScope.launch {
-            runCatching { repository.refresh() }
-                .onSuccess { applyPlaylist(it, repository.playlists()) }
-                .onFailure(::showError)
+        launch {
+            applyPlaylist(repository.refresh(), repository.playlists())
         }
     }
 
     fun deletePlaylist(id: Long) {
         mutableState.update { it.copy(loading = true, error = null) }
-        viewModelScope.launch {
-            runCatching { repository.deletePlaylist(id) }
-                .onSuccess { applyPlaylist(it, repository.playlists()) }
-                .onFailure(::showError)
+        launch {
+            applyPlaylist(repository.deletePlaylist(id), repository.playlists())
         }
     }
 
@@ -332,16 +305,14 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
     private fun loadCatalogPage(reset: Boolean, fetchProviderIfEmpty: Boolean = false) {
         catalogJob?.cancel()
         val snapshot = mutableState.value
-        if (reset) loadedLimit = CatalogRepository.PAGE_SIZE
-        if (!reset && !snapshot.hasMoreChannels) return
         mutableState.update { it.copy(loading = true, error = null) }
         catalogJob = viewModelScope.launch {
             runCatching {
                 var page = repository.observeCatalogPage(
                     snapshot.selectedType,
-                    snapshot.selectedGroup,
-                    snapshot.query,
-                    loadedLimit,
+                    "Todos",
+                    "",
+                    Int.MAX_VALUE,
                 ).first()
                 if (
                     reset && page.total == 0 && fetchProviderIfEmpty &&
@@ -355,9 +326,9 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                     repository.refreshRoom()
                     page = repository.observeCatalogPage(
                         snapshot.selectedType,
-                        snapshot.selectedGroup,
-                        snapshot.query,
-                        loadedLimit,
+                        "Todos",
+                        "",
+                        Int.MAX_VALUE,
                     ).first()
                 }
                 page
@@ -367,7 +338,7 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                         channels = page.channels,
                         availableGroups = page.groups,
                         totalChannels = page.total,
-                        hasMoreChannels = page.hasMore,
+                        hasMoreChannels = false,
                         loading = false,
                     )
                 }
@@ -396,13 +367,46 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun launch(block: suspend () -> Unit) = viewModelScope.launch {
+        runCatching { block() }.onFailure { error ->
+            if (error !is CancellationException) showError(error)
+        }
+    }
+
     private fun showError(error: Throwable) = mutableState.update {
         it.copy(loading = false, error = error.message ?: "Ocorreu um erro inesperado.")
+    }
+
+    /** Loaded whenever playback starts/zaps, so the in-player guide's "Todos" has every group to show. */
+    fun loadGuideChannels(type: StreamType) {
+        viewModelScope.launch {
+            runCatching { repository.observeCatalogPage(type, "Todos", "", limit = Int.MAX_VALUE).first() }
+                .onSuccess { page -> mutableState.update { it.copy(guideChannels = page.channels) } }
+        }
+    }
+
+    /** Loaded on-demand when "Guia TV" opens — independent of whatever the catalog browser last filtered to. */
+    fun loadLiveGuideChannels() {
+        viewModelScope.launch {
+            runCatching { repository.observeLiveGuideChannels().first() }
+                .onSuccess { page -> mutableState.update { it.copy(liveGuideChannels = page.channels) } }
+        }
+    }
+
+    fun loadEpgWindow(fromMillis: Long, toMillis: Long) {
+        epgWindowJob?.cancel()
+        mutableState.update { it.copy(epgWindowLoading = true) }
+        epgWindowJob = viewModelScope.launch {
+            runCatching { repository.observeEpgWindow(fromMillis, toMillis).first() }
+                .onSuccess { window -> mutableState.update { it.copy(epgWindow = window, epgWindowLoading = false) } }
+                .onFailure { mutableState.update { it.copy(epgWindowLoading = false) } }
+        }
     }
 
     override fun onCleared() {
         pairing.close()
         catalogJob?.cancel()
+        epgWindowJob?.cancel()
         roomDatabase.close()
         super.onCleared()
     }

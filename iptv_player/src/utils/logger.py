@@ -23,6 +23,19 @@ def redact_sensitive(message: str) -> str:
     return _MAC_ADDRESS.sub("**:**:**:**:**:**", value)
 
 
+def log_file_path() -> Path:
+    """Return the on-disk log file path used by the file handler."""
+    if os.name == "nt":
+        log_dir = (
+            Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+            / "iptv-player"
+            / "logs"
+        )
+    else:
+        log_dir = Path.home() / ".config" / "iptv-player" / "logs"
+    return log_dir / "iptv_player.log"
+
+
 class _SensitiveDataFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = redact_sensitive(record.getMessage())
@@ -65,13 +78,8 @@ def setup_logger(name: str = "iptv_player") -> logging.Logger:
 
     # File handler (DEBUG and above)
     try:
-        if os.name == "nt":
-            log_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "iptv-player" / "logs"
-        else:
-            log_dir = Path.home() / ".config" / "iptv-player" / "logs"
-        
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "iptv_player.log"
+        log_file = log_file_path()
+        log_file.parent.mkdir(parents=True, exist_ok=True)
 
         file_handler = RotatingFileHandler(
             str(log_file),

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,11 +21,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
@@ -72,7 +77,7 @@ internal val Panel = Color(0xFF10243A)
 internal val PanelFocused = Color(0xFF193A52)
 internal val Accent = Color(0xFF41D3BD)
 internal val Muted = Color(0xFFA6B4C4)
-private enum class MainDestination { HOME, CATALOG, EPG, LISTS, ADD }
+private enum class MainDestination { HOME, CATALOG, EPG, LISTS, ADD, DIAGNOSTICS }
 internal enum class AddMethod { M3U_URL, XTREAM, STALKER }
 
 @Composable
@@ -80,10 +85,22 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var playing by remember { mutableStateOf<Channel?>(null) }
     var playerNotice by remember { mutableStateOf<String?>(null) }
+    // Lifted above the PlayerScreen/CatalogScreen toggle: CatalogScreen is fully disposed
+    // while playing, so anything that must survive a play-then-back trip has to live here.
+    var lastFocusedChannelId by remember { mutableStateOf<Long?>(null) }
+    var destination by remember { mutableStateOf(MainDestination.HOME) }
+    var viewAsList by remember { mutableStateOf(false) }
+    val gridStateCache = remember { mutableMapOf<Any, LazyGridState>() }
+    val listStateCache = remember { mutableMapOf<Any, LazyListState>() }
     MaterialTheme {
         if (playing != null) {
-            val playbackChannels = remember(state.channels, playing!!.type) {
-                state.channels.filter { it.type == playing!!.type }
+            // guideChannels holds every channel of the type currently playing (loaded fresh on
+            // each play/zap below) — falls back to the catalog browser's own filtered list only
+            // until that finishes loading, so the in-player guide's "Todos" always has every
+            // group to show instead of just whichever one was selected before pressing play.
+            val playbackChannels = remember(state.guideChannels, state.channels, playing!!.type) {
+                state.guideChannels.filter { it.type == playing!!.type }
+                    .ifEmpty { state.channels.filter { it.type == playing!!.type } }
             }
             PlayerScreen(
                 channel = playing!!,
@@ -95,10 +112,11 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
                 },
                 onSaveProgress = viewModel::savePlaybackProgress,
                 onSelectChannel = { candidate ->
+                    lastFocusedChannelId = candidate.id
                     playerNotice = "A mudar para ${candidate.name}…"
                     viewModel.preparePlayback(
                         candidate,
-                        onReady = { ready -> playerNotice = null; playing = ready },
+                        onReady = { ready -> playerNotice = null; playing = ready; viewModel.loadGuideChannels(ready.type) },
                         onError = { playerNotice = it },
                     )
                 },
@@ -107,6 +125,10 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
         } else {
             CatalogScreen(
                 state = state,
+                gridStateCache = gridStateCache,
+                listStateCache = listStateCache,
+                lastFocusedChannelId = lastFocusedChannelId,
+                onFocusChannel = { id -> lastFocusedChannelId = id },
                 onSelectType = viewModel::selectType,
                 onSelectGroup = viewModel::selectGroup,
                 onQuery = viewModel::setQuery,
@@ -118,10 +140,16 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
                 onStopPairing = viewModel::stopPairing,
                 onCloseSeries = viewModel::closeSeries,
                 onPlay = { channel ->
+                    lastFocusedChannelId = channel.id
                     viewModel.preparePlayback(
                         channel,
                         onReady = { ready ->
-                            if (ready.url.startsWith("catalog://")) viewModel.openSeries(ready) else playing = ready
+                            if (ready.url.startsWith("catalog://")) {
+                                viewModel.openSeries(ready)
+                            } else {
+                                playing = ready
+                                viewModel.loadGuideChannels(ready.type)
+                            }
                         },
                     )
                 },
@@ -130,6 +158,12 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
                 onRefreshPlaylist = viewModel::refreshPlaylist,
                 onDeletePlaylist = viewModel::deletePlaylist,
                 onLoadMore = viewModel::loadNextCatalogPage,
+                onLoadLiveGuideChannels = viewModel::loadLiveGuideChannels,
+                onLoadEpgWindow = viewModel::loadEpgWindow,
+                destination = destination,
+                onDestinationChange = { destination = it },
+                viewAsList = viewAsList,
+                onViewAsListChange = { viewAsList = it },
             )
         }
     }
@@ -138,6 +172,10 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
 @Composable
 private fun CatalogScreen(
     state: CatalogUiState,
+    gridStateCache: MutableMap<Any, LazyGridState>,
+    listStateCache: MutableMap<Any, LazyListState>,
+    lastFocusedChannelId: Long?,
+    onFocusChannel: (Long) -> Unit,
     onSelectType: (StreamType) -> Unit,
     onSelectGroup: (String) -> Unit,
     onQuery: (String) -> Unit,
@@ -154,12 +192,16 @@ private fun CatalogScreen(
     onRefreshPlaylist: () -> Unit,
     onDeletePlaylist: (Long) -> Unit,
     onLoadMore: () -> Unit,
+    onLoadLiveGuideChannels: () -> Unit,
+    onLoadEpgWindow: (Long, Long) -> Unit,
+    destination: MainDestination,
+    onDestinationChange: (MainDestination) -> Unit,
+    viewAsList: Boolean,
+    onViewAsListChange: (Boolean) -> Unit,
 ) {
     var showSearch by remember { mutableStateOf(false) }
     var showPairing by remember { mutableStateOf(false) }
-    var destination by remember { mutableStateOf(MainDestination.HOME) }
     var addMethod by remember { mutableStateOf<AddMethod?>(null) }
-    var viewAsList by remember { mutableStateOf(false) }
     val projection = remember(
         state.channels,
         state.seriesEpisodes,
@@ -177,29 +219,64 @@ private fun CatalogScreen(
             query = state.query,
         )
     }
+    val firstGroupChipFocusRequester = remember { FocusRequester() }
+    val newListFocusRequester = remember { FocusRequester() }
+    val addSourceFocusRequester = remember { FocusRequester() }
+    // Without an explicit request, moving focus from the sidebar into these screens relies
+    // entirely on Compose's default 2D focus-search heuristics, which can fail to find a good
+    // landing spot (reported as focus getting "stuck" on the sidebar, or needing many presses
+    // to reach "Nova lista"). Mirrors the same fix already applied to the category row below.
+    LaunchedEffect(destination, state.selectedType) {
+        delay(80)
+        when (destination) {
+            MainDestination.CATALOG -> runCatching { firstGroupChipFocusRequester.requestFocus() }
+            MainDestination.LISTS -> runCatching { newListFocusRequester.requestFocus() }
+            MainDestination.ADD -> runCatching { addSourceFocusRequester.requestFocus() }
+            else -> Unit
+        }
+    }
     BackHandler(enabled = state.seriesTitle != null, onBack = onCloseSeries)
     Row(Modifier.fillMaxSize().background(Background)) {
         NavigationSidebar(
             selected = state.selectedType,
             destination = destination,
-            onHome = { destination = MainDestination.HOME },
-            onEpg = { destination = MainDestination.EPG },
-            onSelect = { destination = MainDestination.CATALOG; onSelectType(it) },
+            playlistName = state.playlistName,
+            playlistCount = state.playlists.size,
+            onHome = { onDestinationChange(MainDestination.HOME) },
+            onEpg = { onDestinationChange(MainDestination.EPG) },
+            onSelect = { onDestinationChange(MainDestination.CATALOG); onSelectType(it) },
             onSearch = { showSearch = true },
-            onPlaylists = { destination = MainDestination.LISTS },
-            onImport = { destination = MainDestination.ADD },
+            onPlaylists = { onDestinationChange(MainDestination.LISTS) },
+            onImport = { onDestinationChange(MainDestination.ADD) },
+            onDiagnostics = { onDestinationChange(MainDestination.DIAGNOSTICS) },
         )
-        Box(Modifier.weight(1f).fillMaxSize().padding(horizontal = 34.dp, vertical = 26.dp)) {
+        Box(
+            Modifier.width(1.dp).fillMaxHeight().background(
+                Brush.verticalGradient(
+                    listOf(Color.Transparent, Accent.copy(alpha = 0.35f), Color.Transparent),
+                ),
+            ),
+        )
+        Box(Modifier.weight(1f).fillMaxHeight().padding(start = 28.dp, top = 22.dp, end = 28.dp, bottom = 12.dp)) {
             when (destination) {
-                MainDestination.HOME -> HomeScreen(state, onPlay)
-                MainDestination.EPG -> EpgScreen(state, onPlay)
+                MainDestination.HOME -> HomeScreen(
+                    state = state,
+                    onPlay = onPlay,
+                )
+                MainDestination.EPG -> EpgScreen(
+                    state = state,
+                    onLoadChannels = onLoadLiveGuideChannels,
+                    onLoadWindow = onLoadEpgWindow,
+                    onPlay = onPlay,
+                )
                 MainDestination.LISTS -> PlaylistManagerScreen(
                     playlists = state.playlists,
                     busy = state.loading,
-                    onSelect = { destination = MainDestination.CATALOG; onSelectPlaylist(it) },
+                    onSelect = { onDestinationChange(MainDestination.CATALOG); onSelectPlaylist(it) },
                     onRefresh = onRefreshPlaylist,
                     onDelete = onDeletePlaylist,
-                    onAdd = { destination = MainDestination.ADD },
+                    onAdd = { onDestinationChange(MainDestination.ADD) },
+                    focusRequester = newListFocusRequester,
                 )
                 MainDestination.ADD -> AddPlaylistScreen(
                     busy = state.loading,
@@ -208,35 +285,51 @@ private fun CatalogScreen(
                     onFile = onPickDocument,
                     onXtream = { addMethod = AddMethod.XTREAM },
                     onStalker = { addMethod = AddMethod.STALKER },
-                    onViewLists = { destination = MainDestination.LISTS },
+                    onViewLists = { onDestinationChange(MainDestination.LISTS) },
+                    focusRequester = addSourceFocusRequester,
                 )
+                MainDestination.DIAGNOSTICS -> DiagnosticsScreen(state)
                 MainDestination.CATALOG -> Column(Modifier.fillMaxSize()) {
                     Header(
-                        title = state.seriesTitle ?: state.playlistName,
-                        count = if (state.seriesTitle != null) state.seriesEpisodes.size else state.totalChannels,
+                        sectionTitle = state.seriesTitle ?: typeLabel(state.selectedType),
+                        groupLabel = if (state.seriesTitle == null) state.selectedGroup.takeIf { it != "Todos" } else null,
+                        query = state.query,
+                        count = if (state.seriesTitle != null) state.seriesEpisodes.size else projection.visibleChannels.size,
+                        loading = state.loading,
                         onBack = if (state.seriesTitle != null) onCloseSeries else null,
                         viewAsList = viewAsList,
-                        onToggleView = { viewAsList = !viewAsList },
+                        onToggleView = { onViewAsListChange(!viewAsList) },
+                        onClearQuery = { onQuery("") },
                     )
                     Spacer(Modifier.height(18.dp))
                     GroupRow(
-                        if (state.seriesTitle != null) projection.groups else state.availableGroups,
+                        projection.groups,
                         state.selectedGroup,
                         onSelectGroup,
+                        firstGroupChipFocusRequester,
                     )
                     Spacer(Modifier.height(18.dp))
+                    // Keying the scroll-state cache by (type, group, query) — not just group —
+                    // means switching filters always starts at the top, while coming back to a
+                    // filter already visited (including after a play-then-back trip, since the
+                    // cache map itself is lifted above the PlayerScreen/CatalogScreen toggle in
+                    // IptvTvApp) restores exactly where the user left off.
+                    val filterKey = Triple(state.selectedType, state.selectedGroup, state.query)
                     when {
                         state.seriesLoading -> StatusMessage("A carregar episódios…")
                         state.channels.isEmpty() && state.loading -> StatusMessage("A abrir o catálogo local…")
-                        state.channels.isEmpty() -> EmptyCatalog(onImport = { destination = MainDestination.ADD })
+                        state.channels.isEmpty() -> EmptyCatalog(onImport = { onDestinationChange(MainDestination.ADD) })
                         projection.visibleChannels.isEmpty() -> StatusMessage("Não há conteúdos neste filtro.")
                         else -> if (viewAsList) {
                             ChannelList(
                                 projection.visibleChannels,
                                 state.epg.mapValues { it.value.firstOrNull() }.filterValues { it != null }.mapValues { it.value!! },
                                 state.hasMoreChannels,
+                                listStateCache.getOrPut(filterKey) { LazyListState() },
+                                lastFocusedChannelId,
                                 onLoadMore,
                                 onPlay,
+                                onFocusChannel,
                             )
                         } else {
                             ChannelGrid(
@@ -244,8 +337,11 @@ private fun CatalogScreen(
                                 state.epg.mapValues { it.value.firstOrNull() }.filterValues { it != null }.mapValues { it.value!! },
                                 state.selectedType,
                                 state.hasMoreChannels,
+                                gridStateCache.getOrPut(filterKey) { LazyGridState() },
+                                lastFocusedChannelId,
                                 onLoadMore,
                                 onPlay,
+                                onFocusChannel,
                             )
                         }
                     }
@@ -287,7 +383,11 @@ private fun CatalogScreen(
             initialValue = state.query,
             hint = "Canal, filme, série ou categoria",
             onDismiss = { showSearch = false },
-            onConfirm = { showSearch = false; onQuery(it) },
+            onConfirm = {
+                showSearch = false
+                onDestinationChange(MainDestination.CATALOG)
+                onQuery(it)
+            },
         )
     }
     state.error?.let { message ->
@@ -295,13 +395,23 @@ private fun CatalogScreen(
     }
 }
 
+private fun typeLabel(type: StreamType): String = when (type) {
+    StreamType.LIVE -> "Em direto"
+    StreamType.VOD -> "Filmes"
+    StreamType.SERIES -> "Séries"
+}
+
 @Composable
 private fun Header(
-    title: String,
+    sectionTitle: String,
+    groupLabel: String?,
+    query: String = "",
     count: Int,
+    loading: Boolean,
     onBack: (() -> Unit)? = null,
     viewAsList: Boolean,
     onToggleView: () -> Unit,
+    onClearQuery: () -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         if (onBack != null) {
@@ -309,8 +419,28 @@ private fun Header(
             Spacer(Modifier.width(14.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Text("$count conteúdos", color = Muted, fontSize = 14.sp)
+            val titleText = when {
+                query.isNotBlank() -> "$sectionTitle · Pesquisa: \"$query\""
+                !groupLabel.isNullOrBlank() -> "$sectionTitle · $groupLabel"
+                else -> sectionTitle
+            }
+            Text(
+                titleText,
+                color = Color.White,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "$count conteúdos" + if (loading) " · A atualizar…" else "",
+                color = if (loading) Accent else Muted,
+                fontSize = 14.sp,
+            )
+        }
+        if (query.isNotBlank()) {
+            Button(onClick = onClearQuery) {
+                Text("✕ Limpar pesquisa")
+            }
+            Spacer(Modifier.width(10.dp))
         }
         Button(onClick = onToggleView) {
             Text(if (viewAsList) "Ver em grelha" else "Ver em lista")
@@ -322,19 +452,24 @@ private fun Header(
 private fun NavigationSidebar(
     selected: StreamType,
     destination: MainDestination,
+    playlistName: String,
+    playlistCount: Int,
     onHome: () -> Unit,
     onEpg: () -> Unit,
     onSelect: (StreamType) -> Unit,
     onSearch: () -> Unit,
     onPlaylists: () -> Unit,
     onImport: () -> Unit,
+    onDiagnostics: () -> Unit,
 ) {
     Column(
         Modifier.width(210.dp).fillMaxSize().background(Color(0xFF0B1929)).padding(22.dp),
     ) {
         Text("IPTV", color = Accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         Text("PLAYER TV", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(34.dp))
+        Spacer(Modifier.height(18.dp))
+        ActivePlaylistBadge(playlistName, playlistCount > 1, onPlaylists)
+        Spacer(Modifier.height(20.dp))
         SidebarItem("⌂  Início", destination == MainDestination.HOME, onHome)
         SidebarItem("●  Em direto", destination == MainDestination.CATALOG && selected == StreamType.LIVE) { onSelect(StreamType.LIVE) }
         SidebarItem("▶  Filmes", destination == MainDestination.CATALOG && selected == StreamType.VOD) { onSelect(StreamType.VOD) }
@@ -345,6 +480,7 @@ private fun NavigationSidebar(
         Spacer(Modifier.weight(1f))
         SidebarItem("⌕  Pesquisar", false, onSearch)
         SidebarItem("＋  Adicionar", destination == MainDestination.ADD, onImport)
+        SidebarItem("ℹ  Diagnóstico", destination == MainDestination.DIAGNOSTICS, onDiagnostics)
     }
 }
 
@@ -379,18 +515,63 @@ private fun SidebarItem(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
+private fun ActivePlaylistBadge(name: String, multipleAvailable: Boolean, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxWidth()
+            .background(if (focused) Accent else Panel, RoundedCornerShape(10.dp))
+            .border(if (focused) 0.dp else 1.dp, Color(0xFF23445C), RoundedCornerShape(10.dp))
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(onClick = onClick)
+            .focusable()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Text(
+            "LISTA ATIVA",
+            color = if (focused) Background else Muted,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            name.ifBlank { "IPTV Player TV" },
+            color = if (focused) Background else Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (multipleAvailable) {
+            Text(
+                "Trocar lista",
+                color = if (focused) Background else Accent,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
 private fun HomeScreen(state: CatalogUiState, onPlay: (Channel) -> Unit) {
+    // The active playlist's identity already lives permanently in the sidebar badge, so this
+    // screen doesn't repeat it (that used to surface raw technical identifiers for some
+    // sources, e.g. a Stalker portal's MAC address, as if it were a friendly greeting).
+    val liveNow = remember(state.channels) { state.channels.filter { it.type == StreamType.LIVE }.take(20) }
     Column(Modifier.fillMaxSize()) {
-        Text("Olá!", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-        Text(state.playlistName, color = Muted, fontSize = 16.sp)
+        Text("Início", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(26.dp))
         Text("Favoritos", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
         if (state.homeFavorites.isEmpty()) {
             Box(
-                Modifier.fillMaxWidth().height(120.dp).background(Panel, RoundedCornerShape(16.dp)),
-                contentAlignment = Alignment.Center,
-            ) { Text("Marca canais com o botão vermelho para os veres aqui.", color = Muted) }
+                Modifier.fillMaxWidth().height(84.dp).background(Panel, RoundedCornerShape(16.dp)).padding(horizontal = 22.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    "Marca os teus canais preferidos como favoritos durante a reprodução para os veres aqui.",
+                    color = Muted,
+                )
+            }
         } else {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(state.homeFavorites, key = { it.id }) { channel ->
@@ -398,12 +579,14 @@ private fun HomeScreen(state: CatalogUiState, onPlay: (Channel) -> Unit) {
                 }
             }
         }
-        Spacer(Modifier.height(28.dp))
-        Text("Agora na televisão", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(12.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(state.channels.filter { state.epg[it.tvgId]?.isNotEmpty() == true }.take(20), key = { it.id }) { channel ->
-                HomeChannelCard(channel, state.epg[channel.tvgId]?.firstOrNull(), onPlay)
+        if (liveNow.isNotEmpty()) {
+            Spacer(Modifier.height(28.dp))
+            Text("Em direto agora", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(liveNow, key = { it.id }) { channel ->
+                    HomeChannelCard(channel, state.epg[channel.tvgId]?.firstOrNull(), onPlay)
+                }
             }
         }
     }
@@ -430,54 +613,29 @@ private fun HomeChannelCard(
 }
 
 @Composable
-private fun EpgScreen(state: CatalogUiState, onPlay: (Channel) -> Unit) {
-    Column(Modifier.fillMaxSize()) {
-        Text("Guia TV", color = Color.White, fontSize = 29.sp, fontWeight = FontWeight.Bold)
-        Text("Agora e a seguir", color = Muted)
-        Spacer(Modifier.height(20.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(state.channels.filter { it.type == StreamType.LIVE }, key = { it.id }) { channel ->
-                val programmes = state.epg[channel.tvgId].orEmpty()
-                Row(
-                    Modifier.fillMaxWidth().height(82.dp).background(Panel, RoundedCornerShape(12.dp))
-                        .clickable { onPlay(channel) }.focusable().padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(channel.name, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.width(220.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(programmes.firstOrNull()?.title ?: "Sem informação", color = Accent, maxLines = 1)
-                        Text(programmes.getOrNull(1)?.let { "A seguir: ${it.title}" }.orEmpty(), color = Muted, maxLines = 1)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TypeTabs(selected: StreamType, onSelect: (StreamType) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        listOf(
-            StreamType.LIVE to "Em direto",
-            StreamType.VOD to "Filmes",
-            StreamType.SERIES to "Séries",
-        ).forEach { (type, label) ->
-            FocusChip(label = label, selected = selected == type, onClick = { onSelect(type) })
-        }
-    }
-}
-
-@Composable
-private fun GroupRow(groups: List<String>, selected: String, onSelect: (String) -> Unit) {
+private fun GroupRow(
+    groups: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+    firstChipFocusRequester: FocusRequester? = null,
+) {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        items(groups, key = { it }) { group ->
-            FocusChip(group, selected == group) { onSelect(group) }
+        itemsIndexed(groups, key = { _, item -> item }) { index, group ->
+            FocusChip(
+                group,
+                selected == group,
+                modifier = if (index == 0 && firstChipFocusRequester != null) {
+                    Modifier.focusRequester(firstChipFocusRequester)
+                } else {
+                    Modifier
+                },
+            ) { onSelect(group) }
         }
     }
 }
 
 @Composable
-private fun FocusChip(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun FocusChip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val color = when {
         focused -> Accent
@@ -485,7 +643,7 @@ private fun FocusChip(label: String, selected: Boolean, onClick: () -> Unit) {
         else -> Panel
     }
     Box(
-        Modifier
+        modifier
             .onFocusChanged { focused = it.isFocused }
             .background(color, RoundedCornerShape(10.dp))
             .border(if (focused) 2.dp else 0.dp, Color.White, RoundedCornerShape(10.dp))
@@ -497,24 +655,49 @@ private fun FocusChip(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
+// Restoring focus: a screen-entry effect (keyed on the hoisted `state` identity, which is
+// only ever a fresh object per (filter, play-then-back) entry — see the filterKey-scoped
+// cache in CatalogScreen) scrolls to and focuses whichever channel id was last focused
+// *before* this filter/screen was left, rather than fighting the user's live scrolling by
+// reacting to every subsequent focus change.
 @Composable
 private fun ChannelGrid(
     channels: List<Channel>,
     epg: Map<String, pt.iptvplayer.tv.model.EpgProgram>,
     type: StreamType,
     hasMore: Boolean,
+    gridState: LazyGridState,
+    initialFocusChannelId: Long?,
     onLoadMore: () -> Unit,
     onPlay: (Channel) -> Unit,
+    onFocusChannel: (Long) -> Unit,
 ) {
+    val restoreFocusId = remember(gridState) { initialFocusChannelId }
+    val restoreIndex = remember(gridState, channels) {
+        restoreFocusId?.let { id -> channels.indexOfFirst { it.id == id } } ?: -1
+    }
+    val restoreRequester = remember(gridState) { FocusRequester() }
+    LaunchedEffect(gridState, channels.isNotEmpty()) {
+        if (restoreIndex >= 0) {
+            gridState.scrollToItem((restoreIndex - 4).coerceAtLeast(0))
+            delay(80)
+            runCatching { restoreRequester.requestFocus() }
+        }
+    }
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Adaptive(if (type == StreamType.LIVE) 270.dp else 175.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
         modifier = Modifier.padding(horizontal = 3.dp),
     ) {
-        items(channels, key = { "${it.id}:${it.url.hashCode()}" }) { channel ->
-            if (type == StreamType.LIVE) LiveChannelCard(channel, epg[channel.tvgId]?.title.orEmpty(), onPlay)
-            else PosterChannelCard(channel, onPlay)
+        gridItemsIndexed(channels, key = { _, it -> "${it.id}:${it.url.hashCode()}" }) { index, channel ->
+            val itemModifier = if (index == restoreIndex) Modifier.focusRequester(restoreRequester) else Modifier
+            if (type == StreamType.LIVE) {
+                LiveChannelCard(channel, epg[channel.tvgId]?.title.orEmpty(), onPlay, itemModifier, onFocusChannel)
+            } else {
+                PosterChannelCard(channel, onPlay, itemModifier, onFocusChannel)
+            }
         }
         if (hasMore) {
             item(span = { GridItemSpan(maxLineSpan) }) {
@@ -531,15 +714,32 @@ private fun ChannelList(
     channels: List<Channel>,
     epg: Map<String, pt.iptvplayer.tv.model.EpgProgram>,
     hasMore: Boolean,
+    listState: LazyListState,
+    initialFocusChannelId: Long?,
     onLoadMore: () -> Unit,
     onPlay: (Channel) -> Unit,
+    onFocusChannel: (Long) -> Unit,
 ) {
+    val restoreFocusId = remember(listState) { initialFocusChannelId }
+    val restoreIndex = remember(listState, channels) {
+        restoreFocusId?.let { id -> channels.indexOfFirst { it.id == id } } ?: -1
+    }
+    val restoreRequester = remember(listState) { FocusRequester() }
+    LaunchedEffect(listState, channels.isNotEmpty()) {
+        if (restoreIndex >= 0) {
+            listState.scrollToItem((restoreIndex - 2).coerceAtLeast(0))
+            delay(80)
+            runCatching { restoreRequester.requestFocus() }
+        }
+    }
     LazyColumn(
+        state = listState,
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.padding(horizontal = 3.dp),
     ) {
-        items(channels, key = { "${it.id}:${it.url.hashCode()}" }) { channel ->
-            ChannelListItem(channel, epg[channel.tvgId]?.title.orEmpty(), onPlay)
+        itemsIndexed(channels, key = { _, it -> "${it.id}:${it.url.hashCode()}" }) { index, channel ->
+            val itemModifier = if (index == restoreIndex) Modifier.focusRequester(restoreRequester) else Modifier
+            ChannelListItem(channel, epg[channel.tvgId]?.title.orEmpty(), onPlay, itemModifier, onFocusChannel)
         }
         if (hasMore) {
             item {
@@ -552,16 +752,22 @@ private fun ChannelList(
 }
 
 @Composable
-private fun ChannelListItem(channel: Channel, currentProgram: String, onPlay: (Channel) -> Unit) {
+private fun ChannelListItem(
+    channel: Channel,
+    currentProgram: String,
+    onPlay: (Channel) -> Unit,
+    modifier: Modifier = Modifier,
+    onFocused: (Long) -> Unit = {},
+) {
     var focused by remember { mutableStateOf(false) }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .graphicsLayer {
                 scaleX = if (focused) 1.02f else 1f
                 scaleY = if (focused) 1.02f else 1f
             }
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused(channel.id) }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(13.dp))
             .border(if (focused) 2.dp else 0.dp, Accent, RoundedCornerShape(13.dp))
             .clickable { onPlay(channel) }
@@ -598,16 +804,22 @@ private fun ChannelListItem(channel: Channel, currentProgram: String, onPlay: (C
 }
 
 @Composable
-private fun LiveChannelCard(channel: Channel, currentProgram: String, onPlay: (Channel) -> Unit) {
+private fun LiveChannelCard(
+    channel: Channel,
+    currentProgram: String,
+    onPlay: (Channel) -> Unit,
+    modifier: Modifier = Modifier,
+    onFocused: (Long) -> Unit = {},
+) {
     var focused by remember { mutableStateOf(false) }
     Row(
-        Modifier
+        modifier
             .height(96.dp)
             .graphicsLayer {
                 scaleX = if (focused) 1.035f else 1f
                 scaleY = if (focused) 1.035f else 1f
             }
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused(channel.id) }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(13.dp))
             .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(13.dp))
             .clickable { onPlay(channel) }
@@ -652,15 +864,20 @@ private fun LiveChannelCard(channel: Channel, currentProgram: String, onPlay: (C
 }
 
 @Composable
-private fun PosterChannelCard(channel: Channel, onPlay: (Channel) -> Unit) {
+private fun PosterChannelCard(
+    channel: Channel,
+    onPlay: (Channel) -> Unit,
+    modifier: Modifier = Modifier,
+    onFocused: (Long) -> Unit = {},
+) {
     var focused by remember { mutableStateOf(false) }
     Column(
-        Modifier
+        modifier
             .graphicsLayer {
                 scaleX = if (focused) 1.055f else 1f
                 scaleY = if (focused) 1.055f else 1f
             }
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused(channel.id) }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(13.dp))
             .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(13.dp))
             .clickable { onPlay(channel) }
@@ -734,7 +951,7 @@ private fun EmptyCatalog(onImport: () -> Unit) {
 }
 
 @Composable
-private fun StatusMessage(message: String) {
+internal fun StatusMessage(message: String) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(message, color = Muted, fontSize = 20.sp)
     }
@@ -748,6 +965,7 @@ private fun PlaylistManagerScreen(
     onRefresh: () -> Unit,
     onDelete: (Long) -> Unit,
     onAdd: () -> Unit,
+    focusRequester: FocusRequester? = null,
 ) {
     var pendingDelete by remember { mutableStateOf<PlaylistSummary?>(null) }
     Column(Modifier.fillMaxSize()) {
@@ -756,7 +974,10 @@ private fun PlaylistManagerScreen(
                 Text("As minhas listas", color = Color.White, fontSize = 29.sp, fontWeight = FontWeight.Bold)
                 Text("Escolhe uma lista guardada ou atualiza apenas quando precisares.", color = Muted)
             }
-            Button(onClick = onAdd) { Text("＋ Nova lista") }
+            Button(
+                onClick = onAdd,
+                modifier = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier,
+            ) { Text("＋ Nova lista") }
         }
         Spacer(Modifier.height(22.dp))
         if (busy) {
@@ -831,6 +1052,7 @@ private fun AddPlaylistScreen(
     onXtream: () -> Unit,
     onStalker: () -> Unit,
     onViewLists: () -> Unit,
+    focusRequester: FocusRequester? = null,
 ) {
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -848,7 +1070,10 @@ private fun AddPlaylistScreen(
             Spacer(Modifier.height(14.dp))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            AddSourceCard("▦", "Telemóvel por QR", "A forma mais simples: introduz os dados no telemóvel.", !busy, onPhone, Modifier.weight(1f))
+            AddSourceCard(
+                "▦", "Telemóvel por QR", "A forma mais simples: introduz os dados no telemóvel.", !busy, onPhone,
+                if (focusRequester != null) Modifier.weight(1f).focusRequester(focusRequester) else Modifier.weight(1f),
+            )
             AddSourceCard("XC", "Xtream Codes", "Servidor, utilizador e palavra-passe.", !busy, onXtream, Modifier.weight(1f))
         }
         Spacer(Modifier.height(14.dp))

@@ -1,20 +1,14 @@
 """Main application window for the IPTV Player."""
 
-from dataclasses import replace as dc_replace
-from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QInputDialog,
     QLabel,
-    QLineEdit,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -24,11 +18,11 @@ from PySide6.QtWidgets import (
     QStyle,
     QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from config import APP_VERSION
 from config.settings import Settings
 
 from ..controllers.catalog_controller import CatalogController
@@ -36,41 +30,41 @@ from ..controllers.epg_controller import EpgController
 from ..controllers.playback_controller import PlaybackController
 from ..controllers.playlist_controller import PlaylistController
 from ..controllers.task_controller import TaskController
-from ..core.backup import create_backup, read_backup
 from ..core.channel import Channel
+from ..core.content_types import SERIES, VOD, content_type_for_stream
 from ..core.database import DatabaseManager
-from ..core.device_sync import export_device_state, import_device_state
 from ..core.parental import PinAttemptLimiter
 from ..core.provider_sessions import ProviderSessionManager
-from ..core.task_manager import TaskWorker, report_progress
-from ..core.update_manager import fetch_manifest, is_newer_version
-from ..parsers.m3u_parser import M3UParser
-from ..parsers.stalker_parser import StalkerParser
-from ..parsers.xtream_parser import XtreamParser
+from ..core.task_manager import TaskWorker
 from ..player.media_player import MediaPlayer
 from ..utils.logger import get_logger
+from .catalog_mixin import CatalogMixin
 from .channel_list import ChannelListWidget
-from .dialogs import ParentalPinDialog, PlaylistDialog, SettingsDialog, StalkerDialog, XtreamDialog
+from .dialogs import SettingsDialog
 from .epg_grid_widget import EPGGridWidget
 from .epg_widget import EPGWidget
 from .global_search import GlobalSearchDialog
+from .import_flow_mixin import ImportFlowMixin
 from .pill_tabs import PillTabBar
 from .playback import PlaybackMixin
 from .player_widget import PlayerWidget
+from .playlist_ops_mixin import PlaylistOpsMixin
 from .playlist_widget import PlaylistWidget
 from .series_browser import SeriesBrowserWidget
 from .session_state import SessionStateMixin
 from .theme import Palette
 from .toast import Toast
+from .tools_mixin import ToolsMixin
+from .updates_mixin import UpdatesMixin
 
 
-class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
+class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, ToolsMixin, PlaybackMixin, SessionStateMixin, QMainWindow):
     """Main application window orchestrating all components."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("IPTV Player")
-        self.setMinimumSize(1200, 750)
+        self.setMinimumSize(980, 600)
         self.setWindowIcon(QIcon())
 
         # Core components
@@ -90,6 +84,10 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         self._provider_sessions = ProviderSessionManager(
             self._db,
             lambda: self._settings.get("network_timeout_seconds", 30),
+            # Evaluated per request on the calling thread, so cancelling an
+            # import aborts the in-flight Xtream/Stalker call instead of
+            # waiting for the whole catalogue to be downloaded.
+            lambda: QThread.currentThread().isInterruptionRequested(),
         )
         self._catalog_controller = CatalogController(
             self._db, self._provider_sessions, self._settings
@@ -111,6 +109,13 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         # grid never issues its own per-channel DB round-trips.
         self._epg_grid_cache: dict = {}
         self._epg_grid_cache_playlist_id: Optional[int] = None
+        # In-memory channel cache by playlist ID (playlist_id -> {"live": [...], "vod": [...], "series": [...]})
+        # enables instantaneous (< 5ms) playlist switching in the same session.
+        self._playlist_channel_cache: dict[int, dict[str, list]] = {}
+        # The saved session is restored exactly once per run; later playlist
+        # reloads (after an import, edit or delete) must not switch the user
+        # back to whatever playlist was selected last time.
+        self._session_restored = False
 
         # Saved layout margins for exiting fullscreen
         self._normal_layout_margins = (5, 5, 5, 5)
@@ -122,6 +127,10 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         # Non-intrusive toast notifications + auto-zap guard.
         self._toast = Toast(self)
         self._auto_next_pending = False
+        # Channels already tried as a backup stream, so a failing channel does
+        # not ping-pong between the original and its mirror forever.
+        self._fallback_attempted: set = set()
+        self._fallback_in_progress = False
         self._pin_attempts = PinAttemptLimiter()
 
         # Setup UI (global theme/QSS is applied once at the QApplication level
@@ -132,6 +141,10 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         self._setup_shortcuts()
         self._connect_signals()
         self._load_playlists()
+        if not self._settings.get("first_run_done", False):
+            QTimer.singleShot(0, self._show_first_run_welcome)
+        if self._settings.get("auto_check_updates", True):
+            QTimer.singleShot(2500, self._auto_check_updates)
 
     def _setup_menu_bar(self):
         """Set up the application menu bar."""
@@ -143,7 +156,7 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
             "Importar M3U / M3U8...",
             self,
         )
-        self._action_import_m3u.setShortcut(QKeySequence("Ctrl+M"))
+        self._action_import_m3u.setShortcut(QKeySequence("Ctrl+N"))
         self._action_import_m3u.triggered.connect(self._import_m3u)
 
         self._action_import_xtream = QAction(
@@ -245,9 +258,19 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         fullscreen_action.setShortcut(QKeySequence("F11"))
         fullscreen_action.triggered.connect(self._toggle_window_fullscreen)
         playback_menu.addAction(fullscreen_action)
+        playback_menu.addSeparator()
+        cast_action = QAction("Transmitir para TV / Chromecast...", self)
+        cast_action.setShortcut(QKeySequence("Ctrl+T"))
+        cast_action.triggered.connect(self._show_cast_dialog)
+        playback_menu.addAction(cast_action)
 
         view_menu = menubar.addMenu("Ver")
         view_menu.addAction(self._action_global_search)
+        view_menu.addSeparator()
+        mosaico_action = QAction("Modo Mosaico (Multi-View 2x2)...", self)
+        mosaico_action.setShortcut(QKeySequence("Ctrl+M"))
+        mosaico_action.triggered.connect(self._show_multi_view)
+        view_menu.addAction(mosaico_action)
         view_menu.addSeparator()
         sidebar_action = QAction("Mostrar / ocultar painel lateral", self)
         sidebar_action.setShortcut(QKeySequence("Ctrl+B"))
@@ -265,6 +288,11 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         file_menu.addAction(self._action_export_backup)
         file_menu.addAction(self._action_import_backup)
         file_menu.addSeparator()
+        dl_mgr_action = QAction("Gestor de Transferências...", self)
+        dl_mgr_action.setShortcut(QKeySequence("Ctrl+J"))
+        dl_mgr_action.triggered.connect(self._show_download_manager)
+        file_menu.addAction(dl_mgr_action)
+        file_menu.addSeparator()
         file_menu.addAction(self._action_settings)
         file_menu.addSeparator()
         exit_action = QAction("Sair", self)
@@ -276,6 +304,9 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         check_updates_action = QAction("Verificar atualizações...", self)
         check_updates_action.triggered.connect(self._check_for_updates)
         help_menu.addAction(check_updates_action)
+        diagnostics_action = QAction("Guardar relatório de diagnóstico...", self)
+        diagnostics_action.triggered.connect(self._export_diagnostics_report)
+        help_menu.addAction(diagnostics_action)
         about_action = QAction("Sobre o IPTV Player", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -321,9 +352,15 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
             }}
             QToolButton:pressed {{ background: {Palette.ACCENT}; }}
         """)
-        self._toolbar.addAction(self._action_import_m3u)
-        self._toolbar.addAction(self._action_import_xtream)
-        self._toolbar.addAction(self._action_import_stalker)
+        add_playlist_btn = QToolButton(self._toolbar)
+        add_playlist_btn.setText("➕ Adicionar lista")
+        add_playlist_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        add_menu = QMenu(self)
+        add_menu.addAction(self._action_import_m3u)
+        add_menu.addAction(self._action_import_xtream)
+        add_menu.addAction(self._action_import_stalker)
+        add_playlist_btn.setMenu(add_menu)
+        self._toolbar.addWidget(add_playlist_btn)
         self._toolbar.addSeparator()
         self._toolbar.addAction(self._action_refresh_epg)
         self._toolbar.addAction(self._action_refresh_catalog)
@@ -377,7 +414,7 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         content_layout.setContentsMargins(5, 0, 5, 5)
         content_layout.setSpacing(5)
 
-        self._content_tabs = PillTabBar(["Live", "Vod", "Series"])
+        self._content_tabs = PillTabBar(["Em direto", "Filmes", "Séries"])
         content_layout.addWidget(self._content_tabs)
 
         self._content_stack = QStackedWidget()
@@ -402,19 +439,19 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(5)
 
-        # Player
-        self._player_widget = PlayerWidget(self._media_player, self._settings)
+        # Player (parented to right_panel to avoid unparented top-level window warning)
+        self._player_widget = PlayerWidget(self._media_player, self._settings, parent=right_panel)
         right_layout.addWidget(self._player_widget, 3)
 
         # Bottom tabs (EPG)
         self._bottom_tabs = QTabWidget()
 
         self._epg_widget = EPGWidget()
-        self._bottom_tabs.addTab(self._epg_widget, "📅 EPG")
+        self._bottom_tabs.addTab(self._epg_widget, "📺 Programa do canal")
 
         self._epg_grid_widget = EPGGridWidget()
         self._epg_grid_widget.set_programs_provider(self._epg_programs_for_channel)
-        self._bottom_tabs.addTab(self._epg_grid_widget, "🗓 Guia")
+        self._bottom_tabs.addTab(self._epg_grid_widget, "🗓 Guia completo")
 
         empty_tab = QWidget()
         info_layout = QVBoxLayout(empty_tab)
@@ -425,7 +462,7 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         self._history_list = QListWidget()
         self._history_list.setAlternatingRowColors(True)
         info_layout.addWidget(self._history_list)
-        self._bottom_tabs.addTab(empty_tab, "📋 Info")
+        self._bottom_tabs.addTab(empty_tab, "🕒 Recentes")
 
         resume_tab = QWidget()
         resume_layout = QVBoxLayout(resume_tab)
@@ -437,7 +474,7 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         self._resume_list.setAlternatingRowColors(True)
         self._resume_list.itemDoubleClicked.connect(self._on_resume_item_activated)
         resume_layout.addWidget(self._resume_list)
-        self._bottom_tabs.addTab(resume_tab, "▶ Continuar")
+        self._bottom_tabs.addTab(resume_tab, "▶ Continuar a ver")
 
         right_layout.addWidget(self._bottom_tabs, 1)
 
@@ -506,6 +543,40 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         mute = QShortcut(QKeySequence("M"), self)
         mute.setContext(Qt.ShortcutContext.WindowShortcut)
         mute.activated.connect(self._toggle_mute)
+        recall = QShortcut(QKeySequence("R"), self)
+        recall.setContext(Qt.ShortcutContext.WindowShortcut)
+        recall.activated.connect(self._recall_previous_channel)
+
+        # Subtitle sync shortcuts (G/H, [/])
+        sub_earlier = QShortcut(QKeySequence("G"), self)
+        sub_earlier.setContext(Qt.ShortcutContext.WindowShortcut)
+        sub_earlier.activated.connect(lambda: self._adjust_subtitle_delay(-50))
+        sub_later = QShortcut(QKeySequence("H"), self)
+        sub_later.setContext(Qt.ShortcutContext.WindowShortcut)
+        sub_later.activated.connect(lambda: self._adjust_subtitle_delay(50))
+
+        sub_earlier_alt = QShortcut(QKeySequence("["), self)
+        sub_earlier_alt.setContext(Qt.ShortcutContext.WindowShortcut)
+        sub_earlier_alt.activated.connect(lambda: self._adjust_subtitle_delay(-250))
+        sub_later_alt = QShortcut(QKeySequence("]"), self)
+        sub_later_alt.setContext(Qt.ShortcutContext.WindowShortcut)
+        sub_later_alt.activated.connect(lambda: self._adjust_subtitle_delay(250))
+
+    def _adjust_subtitle_delay(self, delta_ms: int):
+        """Adjust subtitle synchronization delay and show toast."""
+        current = self._media_player.get_subtitle_delay()
+        new_val = max(-10000, min(10000, current + delta_ms))
+        self._media_player.set_subtitle_delay(new_val)
+        sec = new_val / 1000.0
+        self._toast.show_message(f"⏱ Sincronização de Legendas: {new_val:+d} ms ({sec:+.2f} s)")
+
+    @Slot()
+    def _recall_previous_channel(self):
+        """Switch back to the previously played channel."""
+        prev = self._playback_controller.get_recall_channel()
+        if prev:
+            self._on_channel_selected(prev)
+            self._toast.show_message(f"↩ A voltar para: {prev.name}")
 
     @Slot()
     def _on_escape_pressed(self):
@@ -536,9 +607,10 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
             self._playlist_widget.select_playlist(playlist_id)
             self._on_playlist_selected(playlist_id)
         target_tab = 0
-        if channel.stream_type in ("vod", "movie"):
+        result_type = content_type_for_stream(channel.stream_type)
+        if result_type == VOD:
             target_tab = 1
-        elif channel.stream_type == "series":
+        elif result_type == SERIES:
             target_tab = 2
         self._content_tabs.set_current_index(target_tab)
         self._on_content_tab_changed(target_tab)
@@ -548,133 +620,6 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
             self._on_vod_selected(channel)
         else:
             self._on_series_show_opened(channel)
-
-    @Slot()
-    def _copy_device_sync(self):
-        """Copy credential-free favorites/resume state for the TV pairing page."""
-        if not self._current_playlist_id:
-            QMessageBox.information(
-                self, "Sincronizar TV", "Seleciona primeiro uma playlist."
-            )
-            return
-        payload = export_device_state(self._db, self._current_playlist_id)
-        QApplication.clipboard().setText(payload)
-        QMessageBox.information(
-            self,
-            "Sincronizar TV",
-            "Os favoritos e pontos de retoma foram copiados. Abre o QR code da TV "
-            "no navegador e cola os dados na secção Sincronização. Não são incluídos "
-            "URLs nem credenciais.",
-        )
-
-    @Slot()
-    def _import_device_sync(self):
-        """Merge credential-free favorites/resume copied from the TV."""
-        if not self._current_playlist_id:
-            QMessageBox.information(
-                self, "Sincronizar TV", "Seleciona primeiro uma playlist."
-            )
-            return
-        payload, accepted = QInputDialog.getMultiLineText(
-            self,
-            "Sincronizar TV",
-            "Cola o estado copiado da página de emparelhamento da TV:",
-        )
-        if not accepted or not payload.strip():
-            return
-        try:
-            result = import_device_state(
-                self._db, self._current_playlist_id, payload.strip()
-            )
-        except (ValueError, TypeError, KeyError) as error:
-            QMessageBox.warning(self, "Sincronizar TV", str(error))
-            return
-        self._distribute_channels(
-            self._db.get_channels(self._current_playlist_id)
-        )
-        QMessageBox.information(
-            self,
-            "Sincronizar TV",
-            f"Importados {result['favorites']} favoritos e "
-            f"{result['progress']} pontos de retoma.",
-        )
-
-    @Slot()
-    def _export_backup(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Exportar backup cifrado",
-            f"IPTVPlayer-backup-{datetime.now():%Y%m%d}.iptvbackup",
-            "Backup IPTV Player (*.iptvbackup)",
-        )
-        if not path:
-            return
-        password, accepted = QInputDialog.getText(
-            self,
-            "Proteger backup",
-            "Palavra-passe (mínimo 8 caracteres):",
-            QLineEdit.EchoMode.Password,
-        )
-        if not accepted:
-            return
-        confirmation, accepted = QInputDialog.getText(
-            self,
-            "Confirmar palavra-passe",
-            "Repete a palavra-passe:",
-            QLineEdit.EchoMode.Password,
-        )
-        if not accepted or confirmation != password:
-            QMessageBox.warning(self, "Backup", "As palavras-passe não coincidem.")
-            return
-
-        def export():
-            create_backup(Path(path), self._db.export_backup_data(), password)
-            return path
-
-        self._run_background(
-            export,
-            lambda saved: QMessageBox.information(
-                self, "Backup", f"Backup criado em:\n{saved}"
-            ),
-            status_message="A criar backup cifrado...",
-        )
-
-    @Slot()
-    def _import_backup(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Importar backup cifrado",
-            "",
-            "Backup IPTV Player (*.iptvbackup)",
-        )
-        if not path:
-            return
-        password, accepted = QInputDialog.getText(
-            self,
-            "Abrir backup",
-            "Palavra-passe do backup:",
-            QLineEdit.EchoMode.Password,
-        )
-        if not accepted:
-            return
-
-        def restore():
-            data = read_backup(Path(path), password)
-            return self._db.import_backup_data(data)
-
-        def restored(playlist_ids):
-            self._load_playlists()
-            QMessageBox.information(
-                self,
-                "Backup",
-                f"{len(playlist_ids)} playlist(s) importada(s). Os dados existentes foram preservados.",
-            )
-
-        self._run_background(
-            restore,
-            restored,
-            status_message="A importar backup cifrado...",
-        )
 
     @Slot()
     def _toggle_window_fullscreen(self):
@@ -690,6 +635,54 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
     @Slot()
     def _toggle_epg_panel(self):
         self._bottom_tabs.setVisible(not self._bottom_tabs.isVisible())
+
+    @Slot()
+    def _show_multi_view(self):
+        from .multi_view_dialog import MultiViewDialog
+        channels = []
+        if self._current_playlist_id:
+            try:
+                channels = self._db.get_channels_by_type(self._current_playlist_id, "live")
+            except Exception:
+                channels = []
+        dialog = MultiViewDialog(
+            channels=channels,
+            initial_channel=getattr(self, "_current_playback_channel", None),
+            parent=self,
+        )
+        dialog.exec()
+
+    @Slot()
+    def _show_download_manager(self):
+        from .download_manager_dialog import DownloadManagerDialog
+        dialog = DownloadManagerDialog(media_player=self._media_player, parent=self)
+        dialog.exec()
+
+    @Slot()
+    def _show_cast_dialog(self):
+        from .cast_dialog import CastDialog
+        curr_channel = getattr(self, "_current_playback_channel", None)
+        url = curr_channel.url if curr_channel else ""
+        title = curr_channel.name if curr_channel else ""
+        headers = {}
+        is_live = True
+        if curr_channel:
+            headers = dict(curr_channel.custom_headers or {})
+            if curr_channel.user_agent:
+                headers["User-Agent"] = curr_channel.user_agent
+            if curr_channel.referer:
+                headers["Referer"] = curr_channel.referer
+            is_live = curr_channel.stream_type == "live"
+
+        dialog = CastDialog(
+            current_url=url,
+            current_title=title,
+            headers=headers,
+            is_live=is_live,
+            media_player=self._media_player,
+            parent=self,
+        )
+        dialog.exec()
 
     @Slot()
     def _show_about(self):
@@ -759,11 +752,13 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         self._live_list.favorite_toggled.connect(self._on_favorite_toggled)
         self._live_list.diagnostic_requested.connect(self._diagnose_channel)
         self._live_list.page_or_filter_changed.connect(self._on_live_page_changed)
+        self._live_list.set_url_provider(self._resolve_channel_url)
 
         # Vod list (movies need lazy resolve for Stalker before playback)
         self._vod_list.channel_selected.connect(self._on_vod_selected)
         self._vod_list.favorite_toggled.connect(self._on_favorite_toggled)
         self._vod_list.diagnostic_requested.connect(self._diagnose_channel)
+        self._vod_list.set_url_provider(self._resolve_channel_url)
 
         # Series browser (shows -> seasons/episodes drill-down)
         self._series_browser.show_drill_down_requested.connect(self._on_series_show_opened)
@@ -792,6 +787,7 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         self._player_widget.next_channel_requested.connect(
             lambda: self._live_list.play_adjacent(1)
         )
+        self._player_widget.retry_requested.connect(self._retry_current_channel)
         self._media_player.time_changed.connect(self._track_playback_time)
         self._media_player.length_changed.connect(self._track_playback_length)
         self._media_player.media_ended.connect(self._on_media_ended)
@@ -801,135 +797,17 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         """Load saved playlists from database."""
         try:
             playlists = self._playlist_controller.list()
+            self._playlist_names = {p["id"]: p.get("name", "Playlist") for p in playlists}
             self._playlist_widget.set_playlists(playlists)
-            self._restore_session_state(playlists)
+            # Restore the previous session once, on the first load after
+            # startup only. Deferring it keeps startup from being blocked by a
+            # large catalog, but re-running it after an import would silently
+            # switch back to the previously selected playlist.
+            if not self._session_restored:
+                self._session_restored = True
+                QTimer.singleShot(0, lambda: self._restore_session_state(playlists))
         except Exception as e:
             self._logger.error(f"Failed to load playlists: {e}")
-
-    @Slot()
-    def _import_m3u(self):
-        """Open M3U import dialog and parse playlist."""
-        dialog = PlaylistDialog(self)
-        if dialog.exec() != PlaylistDialog.DialogCode.Accepted:
-            return
-
-        source = dialog.playlist_path or dialog.playlist_url
-        if not source:
-            QMessageBox.warning(self, "Aviso", "Seleciona um ficheiro ou URL.")
-            return
-
-        name = dialog.playlist_name
-        epg_source = dialog.epg_source
-        if not name:
-            QMessageBox.warning(
-                self, "Aviso", "Indica um nome para a playlist."
-            )
-            return
-
-        def import_func():
-            parser = M3UParser(
-                timeout=self._settings.get("network_timeout_seconds", 30),
-                user_agent=self._settings.get("user_agent", ""),
-            )
-            playlist = parser.parse(source, name)
-            if epg_source:
-                if epg_source.startswith(("http://", "https://")):
-                    playlist.epg_url = epg_source
-                else:
-                    playlist.epg_source = epg_source
-            return playlist
-
-        self._run_import(import_func, "A importar playlist M3U...")
-
-    @Slot()
-    def _import_xtream(self):
-        """Open Xtream login dialog and fetch channels."""
-        dialog = XtreamDialog(self)
-        if dialog.exec() != XtreamDialog.DialogCode.Accepted:
-            return
-
-        server = dialog.server_url
-        username = dialog.username
-        password = dialog.password
-        name = dialog.playlist_name
-
-        if not all([name, server, username, password]):
-            QMessageBox.warning(self, "Aviso", "Preenche todos os campos.")
-            return
-
-        def import_func():
-            with XtreamParser(
-                server,
-                username,
-                password,
-                timeout=self._settings.get("network_timeout_seconds", 30),
-            ) as parser:
-                parser.authenticate()
-                playlist = parser.get_full_playlist(
-                    should_cancel=lambda: QThread.currentThread().isInterruptionRequested(),
-                    include_vod=False,
-                    include_series=False,
-                )
-            playlist.name = name
-            return playlist
-
-        self._run_import(import_func, "A ligar ao servidor Xtream...")
-
-    @Slot()
-    def _import_stalker(self):
-        """Open Stalker login dialog and fetch channels."""
-        dialog = StalkerDialog(self)
-        if dialog.exec() != StalkerDialog.DialogCode.Accepted:
-            return
-
-        portal = dialog.portal_url
-        mac = dialog.mac_address
-        name = dialog.playlist_name
-
-        if not all([name, portal, mac]):
-            QMessageBox.warning(self, "Aviso", "Preenche todos os campos.")
-            return
-
-        def import_func():
-            with StalkerParser(
-                portal,
-                mac,
-                timeout=self._settings.get("network_timeout_seconds", 30),
-            ) as parser:
-                parser.authenticate()
-                playlist = parser.get_full_playlist(
-                    should_cancel=lambda: QThread.currentThread().isInterruptionRequested(),
-                )
-            playlist.name = name
-            return playlist
-
-        self._run_import(import_func, "A ligar ao portal Stalker...")
-
-    def _run_import(self, import_func, status_message: str):
-        """Run import in a worker thread."""
-        if self._closing:
-            return
-        if getattr(self, "_worker", None) and self._worker.isRunning():
-            self.statusBar().showMessage("Já existe uma importação em curso.")
-            return
-        self.statusBar().showMessage(status_message)
-
-        def limited_import_func():
-            if QThread.currentThread().isInterruptionRequested():
-                return None
-            return self._task_controller.execute(import_func)
-
-        self._worker = TaskWorker(limited_import_func)
-        self._task_controller.add(self._worker)
-        self._worker.succeeded.connect(self._on_import_finished)
-        self._worker.failed.connect(self._on_import_error)
-        self._worker.cancelled.connect(self._on_task_cancelled)
-        self._worker.progress.connect(self._on_task_progress)
-        self._worker.finished.connect(
-            lambda worker=self._worker: self._on_worker_finished(worker)
-        )
-        self._worker.start()
-        self._sync_task_widgets()
 
     def _run_background(
         self,
@@ -938,6 +816,7 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         on_error=None,
         status_message: str = "",
         context_playlist_id: Optional[int] = None,
+        use_semaphore: bool = True,
     ):
         """
         Run a one-off background call (resolve a stream URL, list seasons,
@@ -953,7 +832,9 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         def limited_func():
             if QThread.currentThread().isInterruptionRequested():
                 return None
-            return self._task_controller.execute(func)
+            if use_semaphore:
+                return self._task_controller.execute(func)
+            return func()
 
         worker = TaskWorker(limited_func)
         self._task_controller.add(worker)
@@ -966,7 +847,10 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
                 and self._current_playlist_id != context_playlist_id
             ):
                 return
-            on_success(result)
+            try:
+                on_success(result)
+            except Exception:
+                self._logger.exception("Erro no callback de sucesso em background")
 
         def _on_fail(message):
             if self._closing:
@@ -977,7 +861,10 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
             ):
                 return
             if on_error:
-                on_error(message)
+                try:
+                    on_error(message)
+                except Exception:
+                    self._logger.exception("Erro no callback de erro em background")
             else:
                 self.statusBar().showMessage("Erro")
                 QMessageBox.warning(self, "Erro", message)
@@ -1018,448 +905,6 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
         if not self._closing:
             self.statusBar().showMessage("Operação cancelada.")
 
-    def _distribute_channels(self, channels: list):
-        """Split channels by stream_type across the Live/Vod/Series pages."""
-        live = [c for c in channels if c.stream_type == "live"]
-        vod = [c for c in channels if c.stream_type in ("vod", "movie")]
-        series = [c for c in channels if c.stream_type == "series"]
-        self._live_list.set_channels(live)
-        self._vod_list.set_channels(vod)
-        self._series_browser.set_shows(series)
-        self._refresh_locked_groups()
-
-    @Slot(int)
-    def _on_content_tab_changed(self, index: int):
-        self._content_stack.setCurrentIndex(index)
-        self._ensure_catalog_for_tab(index)
-
-    @Slot()
-    def _refresh_current_catalog(self):
-        if not self._current_playlist_id:
-            self.statusBar().showMessage("Seleciona primeiro uma playlist.")
-            return
-        index = self._content_stack.currentIndex()
-        self._ensure_catalog_for_tab(index, force=True)
-
-    def _ensure_catalog_for_tab(self, index: int, force: bool = False):
-        """Load VOD/series only when its tab is first opened or refreshed."""
-        playlist_id = self._current_playlist_id
-        content_type = {0: "live", 1: "vod", 2: "series"}.get(index)
-        if not playlist_id or not content_type:
-            return
-
-        playlist = self._db.get_playlist(playlist_id)
-        source_type = playlist.get("source_type") if playlist else ""
-        if not playlist or (
-            source_type not in ("stalker", "xtream")
-            and source_type not in ("m3u", "m3u_plus")
-        ):
-            return
-        key = (playlist_id, content_type)
-        if key in self._catalog_loading:
-            self.statusBar().showMessage(
-                f"O catálogo {content_type.upper()} já está a carregar..."
-            )
-            return
-
-        state = self._db.get_catalog_state(playlist_id, content_type)
-        if state and state.get("status") == "ready" and not force:
-            return
-
-        self._catalog_loading.add(key)
-        previous_count = state.get("item_count", 0) if state else 0
-        self._db.set_catalog_state(
-            playlist_id, content_type, "loading", previous_count
-        )
-        target_widget = {0: self._live_list, 1: self._vod_list}.get(index)
-        if target_widget is not None:
-            target_widget.set_status_message(
-                f"A carregar catálogo {content_type.upper()}..."
-            )
-        def fetch_and_store():
-            def should_cancel():
-                return QThread.currentThread().isInterruptionRequested()
-
-            return self._catalog_controller.refresh(
-                playlist_id,
-                content_type,
-                should_cancel=should_cancel,
-                progress=report_progress,
-            )
-
-        def on_success(channels):
-            self._catalog_loading.discard(key)
-            if channels is None:
-                return
-            if self._current_playlist_id == playlist_id:
-                if target_widget is not None:
-                    target_widget.set_status_message("")
-                self._distribute_channels(channels)
-                accepted_types = (
-                    ("vod", "movie")
-                    if content_type == "vod"
-                    else (content_type,)
-                )
-                item_count = sum(
-                    1 for channel in channels
-                    if channel.stream_type in accepted_types
-                )
-                self.statusBar().showMessage(
-                    f"Catálogo {content_type.upper()} atualizado: "
-                    f"{item_count} itens."
-                )
-
-        def on_error(message):
-            self._catalog_loading.discard(key)
-            self._db.set_catalog_state(
-                playlist_id, content_type, "error", previous_count, message
-            )
-            if self._current_playlist_id == playlist_id:
-                if target_widget is not None:
-                    target_widget.set_status_message(
-                        f"Falha ao carregar: {message}"
-                    )
-                self.statusBar().showMessage(
-                    f"Falha ao carregar {content_type.upper()}: {message}"
-                )
-
-        self._run_background(
-            fetch_and_store,
-            on_success,
-            on_error,
-            status_message=f"A carregar catálogo {content_type.upper()}...",
-        )
-
-    def _epg_channel_maps(self, channels: list):
-        """Return canonical EPG IDs and display names for live channels."""
-        return self._epg_controller.channel_maps(channels)
-
-    def _show_epg_programs(self, programs: list, channels: list, playlist_id: Optional[int] = None):
-        """Group normalized programs and hand them to the EPG widget.
-
-        Also seeds the guide-grid's in-memory cache from the same grouped
-        data (when `playlist_id` is given) so the grid never needs its own
-        per-channel DB round-trips — see `_epg_programs_for_channel`.
-        """
-        grouped = {}
-        for program in programs:
-            grouped.setdefault(program.channel_id, []).append(program)
-        _, channel_names = self._epg_channel_maps(channels)
-        self._epg_widget.set_epg_data(grouped, channel_names)
-        if playlist_id is not None:
-            self._epg_grid_cache = grouped
-            self._epg_grid_cache_playlist_id = playlist_id
-
-    def _load_playlist_epg(
-        self, playlist_id: int, channels: list, force: bool = False
-    ):
-        """Show cached EPG and refresh a configured XMLTV source when stale."""
-        cached = self._epg_controller.cached(playlist_id)
-        self._show_epg_programs(cached, channels, playlist_id)
-
-        playlist = self._db.get_playlist(playlist_id)
-        if not playlist:
-            return
-        source = playlist.get("epg_url") or playlist.get("epg_source")
-        if not source or playlist.get("source_type") not in ("m3u", "m3u_plus"):
-            return
-        if playlist_id in self._epg_loading_playlists:
-            return
-
-        if not self._epg_controller.should_refresh(playlist_id, cached, force):
-            return
-
-        self._epg_loading_playlists.add(playlist_id)
-
-        def fetch_and_cache():
-            return self._epg_controller.refresh_xmltv(
-                playlist_id, source, channels
-            )
-
-        def on_success(programs):
-            self._epg_loading_playlists.discard(playlist_id)
-            if self._current_playlist_id == playlist_id:
-                self._show_epg_programs(programs, channels, playlist_id)
-                self.statusBar().showMessage(
-                    f"EPG atualizado: {len(programs)} programas."
-                )
-
-        def on_error(message):
-            self._epg_loading_playlists.discard(playlist_id)
-            self._logger.warning(f"Failed to update XMLTV EPG: {message}")
-            if self._current_playlist_id == playlist_id:
-                self.statusBar().showMessage(f"Não foi possível atualizar o EPG: {message}")
-
-        self._run_background(
-            fetch_and_cache,
-            on_success,
-            on_error,
-            status_message="A atualizar o guia EPG...",
-        )
-
-    @Slot()
-    def _refresh_current_epg(self):
-        """Force a refresh of the current playlist's configured XMLTV source."""
-        if not self._current_playlist_id:
-            self.statusBar().showMessage("Seleciona primeiro uma playlist.")
-            return
-        playlist = self._db.get_playlist(self._current_playlist_id)
-        if playlist and playlist.get("source_type") in ("xtream", "stalker"):
-            self.statusBar().showMessage(
-                "Nesta playlist, o EPG é atualizado ao selecionar cada canal."
-            )
-            return
-        if not playlist or not (
-            playlist.get("epg_url") or playlist.get("epg_source")
-        ):
-            self.statusBar().showMessage(
-                "Esta playlist não tem uma fonte XMLTV configurada."
-            )
-            return
-        channels = self._db.get_channels(self._current_playlist_id)
-        self._load_playlist_epg(self._current_playlist_id, channels, force=True)
-
-    def _load_channel_epg(self, channel: Channel):
-        """Display cached EPG and lazily refresh Xtream EPG for one channel."""
-        playlist_id = self._current_playlist_id
-        channel_id = channel.epg_channel_id or channel.tvg_id or channel.xtream_id
-        if not playlist_id or not channel_id:
-            return
-
-        cached = self._epg_controller.cached(playlist_id, channel_id)
-        if cached:
-            self._epg_widget.add_channel_programs(
-                channel_id, cached, channel.name
-            )
-        self._epg_widget.select_channel(channel_id)
-
-        if channel.source not in ("xtream", "stalker"):
-            return
-        now = datetime.now(cached[0].start.tzinfo if cached else None)
-        if cached and max(program.stop for program in cached) > now + timedelta(hours=2):
-            return
-
-        key = (playlist_id, channel.database_id)
-        if key in self._epg_loading_channels:
-            return
-        self._epg_loading_channels.add(key)
-
-        def fetch_and_cache():
-            if channel.source == "xtream":
-                programs = self._call_xtream(
-                    playlist_id,
-                    lambda parser: parser.get_epg_programs(
-                        channel.xtream_id, channel_id=channel_id
-                    ),
-                )
-            else:
-                programs = self._call_stalker(
-                    playlist_id,
-                    lambda parser: parser.get_epg_programs(channel_id),
-                )
-            self._db.replace_channel_epg(playlist_id, channel_id, programs)
-            return programs
-
-        def on_success(programs):
-            self._epg_loading_channels.discard(key)
-            if self._current_playlist_id == playlist_id:
-                self._epg_widget.add_channel_programs(
-                    channel_id, programs, channel.name
-                )
-                self._epg_widget.select_channel(channel_id)
-
-        def on_error(message):
-            self._epg_loading_channels.discard(key)
-            self._logger.warning(f"Failed to update Xtream EPG: {message}")
-
-        self._run_background(fetch_and_cache, on_success, on_error)
-
-    def _on_live_page_changed(self):
-        """Keep the EPG guide grid in sync with the Live list — but only do
-        any work when the Guia tab is actually visible. This signal fires on
-        every search keystroke/category click/page turn, so skipping it here
-        when the tab isn't shown avoids unnecessary EPG cache/fetch work on
-        every filter change."""
-        if self._bottom_tabs.currentWidget() is not self._epg_grid_widget:
-            return
-        self._refresh_epg_grid()
-
-    @Slot(int)
-    def _on_bottom_tab_changed(self, index: int):
-        if self._bottom_tabs.widget(index) is self._epg_grid_widget:
-            self._refresh_epg_grid()
-
-    def _refresh_epg_grid(self):
-        playlist_id = self._current_playlist_id
-        if playlist_id and self._epg_grid_cache_playlist_id != playlist_id:
-            self._epg_grid_cache = {}
-            programs = self._db.get_playlist_epg(playlist_id)
-            for program in programs:
-                self._epg_grid_cache.setdefault(program.channel_id, []).append(program)
-            self._epg_grid_cache_playlist_id = playlist_id
-        self._epg_grid_widget.set_channels(self._live_list.get_current_page_channels())
-
-    def _epg_programs_for_channel(self, channel: Channel) -> list:
-        """In-memory cache lookup used by the guide grid; never hits the DB."""
-        if self._epg_grid_cache_playlist_id != self._current_playlist_id:
-            return []
-        channel_id = channel.epg_channel_id or channel.tvg_id or channel.xtream_id
-        return self._epg_grid_cache.get(channel_id, [])
-
-    def _ensure_epg_for_channels(self, channels: list):
-        """Lazily fetch EPG for exactly the channels currently shown in the
-        guide grid, one at a time, reusing the same fetch+cache flow as
-        `_load_channel_epg` — never a bulk fetch for the whole catalog."""
-        playlist_id = self._current_playlist_id
-        if not playlist_id:
-            return
-
-        to_fetch = []
-        for channel in channels:
-            if channel.source not in ("xtream", "stalker"):
-                continue
-            channel_id = channel.epg_channel_id or channel.tvg_id or channel.xtream_id
-            if not channel_id:
-                continue
-            key = (playlist_id, channel.database_id)
-            if key in self._epg_loading_channels:
-                continue
-            cached = self._epg_grid_cache.get(channel_id, [])
-            now = datetime.now(cached[0].start.tzinfo if cached else None)
-            if cached and max(program.stop for program in cached) > now + timedelta(hours=2):
-                continue
-            to_fetch.append((channel, channel_id))
-
-        def fetch_next(index: int = 0):
-            if index >= len(to_fetch) or self._current_playlist_id != playlist_id:
-                return
-            channel, channel_id = to_fetch[index]
-            key = (playlist_id, channel.database_id)
-            self._epg_loading_channels.add(key)
-
-            def fetch_and_cache():
-                if channel.source == "xtream":
-                    programs = self._call_xtream(
-                        playlist_id,
-                        lambda parser: parser.get_epg_programs(
-                            channel.xtream_id, channel_id=channel_id
-                        ),
-                    )
-                else:
-                    programs = self._call_stalker(
-                        playlist_id,
-                        lambda parser: parser.get_epg_programs(channel_id),
-                    )
-                self._db.replace_channel_epg(playlist_id, channel_id, programs)
-                return programs
-
-            def on_success(programs):
-                self._epg_loading_channels.discard(key)
-                if self._current_playlist_id == playlist_id:
-                    if self._epg_grid_cache_playlist_id == playlist_id:
-                        self._epg_grid_cache[channel_id] = programs
-                    self._epg_grid_widget.refresh()
-                QTimer.singleShot(400, lambda: fetch_next(index + 1))
-
-            def on_error(message):
-                self._epg_loading_channels.discard(key)
-                self._logger.warning(f"Failed to update guide EPG: {message}")
-                QTimer.singleShot(400, lambda: fetch_next(index + 1))
-
-            self._run_background(fetch_and_cache, on_success, on_error)
-
-        fetch_next()
-
-    @Slot(object, object)
-    def _play_catchup(self, channel: Channel, program):
-        """Play a past programme via Xtream timeshift (catch-up)."""
-        if channel.source != "xtream" or not channel.has_archive:
-            return
-        playlist_id = self._current_playlist_id
-        if not playlist_id:
-            return
-
-        def build_url():
-            return self._call_xtream(
-                playlist_id,
-                lambda parser: parser.build_timeshift_url(
-                    channel.xtream_id,
-                    program.start,
-                    max(1, program.duration_minutes),
-                ),
-            )
-
-        def on_built(timeshift_url):
-            self._play_channel(
-                dc_replace(
-                    channel,
-                    url=timeshift_url,
-                    name=f"{channel.name} · {program.title}",
-                )
-            )
-
-        def on_failed(message):
-            self._logger.warning(
-                f"Failed to build catch-up URL for {channel.name}: {message}"
-            )
-
-        # Build the timeshift URL on a worker thread: authenticate() on a
-        # cold Xtream session performs blocking HTTP and would freeze the UI.
-        self._run_background(
-            build_url,
-            on_built,
-            on_error=on_failed,
-            status_message=f"A obter catch-up: {channel.name}...",
-            context_playlist_id=playlist_id,
-        )
-
-    @Slot(str, bool)
-    def _on_group_lock_toggle_requested(self, group: str, new_locked_state: bool):
-        """Persist a category lock/unlock and refresh all three catalog widgets."""
-        if not self._current_playlist_id:
-            return
-        if new_locked_state:
-            self._db.lock_group(self._current_playlist_id, group)
-        else:
-            self._db.unlock_group(self._current_playlist_id, group)
-        self._refresh_locked_groups()
-
-    def _refresh_locked_groups(self):
-        if not self._current_playlist_id:
-            return
-        locked = self._db.get_locked_groups(self._current_playlist_id)
-        for widget in (self._live_list, self._vod_list, self._series_browser):
-            widget.set_locked_groups(locked)
-
-    def _on_locked_group_access_requested(self, widget, group: str):
-        """Prompt for the parental PIN and unlock the category for this session."""
-        if not self._settings.get("parental_lock_enabled", False):
-            widget.unlock_group_session(group)
-            return
-        pin_hash = self._settings.get("parental_pin_hash", "")
-        pin_salt = self._settings.get("parental_pin_salt", "")
-        if not pin_hash:
-            widget.unlock_group_session(group)
-            return
-        if not self._pin_attempts.is_allowed():
-            QMessageBox.warning(
-                self,
-                "PIN temporariamente bloqueado",
-                f"Aguarda {self._pin_attempts.remaining_seconds} segundos antes de tentar novamente.",
-            )
-            return
-        dialog = ParentalPinDialog(self, title=f"PIN para desbloquear '{group}'")
-        if dialog.exec() != ParentalPinDialog.DialogCode.Accepted:
-            return
-        from ..core.parental import verify_pin
-
-        if verify_pin(dialog.pin, pin_salt, pin_hash):
-            self._pin_attempts.reset()
-            widget.unlock_group_session(group)
-        else:
-            self._pin_attempts.register_failure()
-            QMessageBox.warning(self, "PIN incorreto", "O PIN introduzido está incorreto.")
-
     def _call_stalker(self, playlist_id: int, callback):
         return self._provider_sessions.call_stalker(playlist_id, callback)
 
@@ -1468,293 +913,6 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
 
     def _discard_provider_sessions(self, playlist_id: Optional[int] = None):
         self._provider_sessions.discard(playlist_id)
-
-    @Slot(object)
-    def _on_import_finished(self, playlist):
-        """Handle successful playlist import."""
-        if playlist is None:
-            self.statusBar().showMessage("Importação cancelada.")
-            return
-        self.statusBar().showMessage(f"Playlist importada: {playlist.name}")
-
-        try:
-            playlist_id, channels = self._playlist_controller.import_playlist(playlist)
-            self._load_playlists()
-            self._playlist_widget.select_playlist(playlist_id)
-
-            # Select the imported playlist
-            self._current_playlist_id = playlist_id
-
-            self._distribute_channels(channels)
-            self._load_playlist_epg(playlist_id, channels)
-
-            QMessageBox.information(
-                self,
-                "Importado com sucesso",
-                f"Playlist '{playlist.name}' importada!\n"
-                f"{len(channels)} itens carregados."
-            )
-        except Exception as e:
-            self._logger.error(f"Failed to save playlist: {e}")
-            QMessageBox.critical(self, "Erro", f"Falha ao guardar playlist: {e}")
-
-    @Slot(str)
-    def _on_import_error(self, error_message: str):
-        """Handle import errors."""
-        self.statusBar().showMessage("Erro na importação")
-        QMessageBox.critical(self, "Erro de Importação", error_message)
-
-    @Slot(int)
-    def _on_playlist_selected(self, playlist_id: int):
-        """Handle playlist selection."""
-        self._current_playlist_id = playlist_id
-        self._refresh_history()
-        self._refresh_resume()
-        try:
-            playlist_details, channels = self._playlist_controller.open(playlist_id)
-            if playlist_details and playlist_details.get("source_type") in (
-                "m3u",
-                "m3u_plus",
-            ):
-                repaired = False
-                for channel in channels:
-                    inferred_type = M3UParser.infer_stream_type(
-                        channel.url, channel.group, channel.name
-                    )
-                    if inferred_type != channel.stream_type:
-                        channel.stream_type = inferred_type
-                        repaired = True
-                if repaired:
-                    self._db.update_channel_stream_types(playlist_id, channels)
-            if (
-                playlist_details
-                and playlist_details.get("source_type") == "stalker"
-                and any(not channel.user_agent or not channel.referer for channel in channels)
-            ):
-                with StalkerParser(
-                    playlist_details["server_url"],
-                    playlist_details["mac_address"],
-                    timeout=self._settings.get("network_timeout_seconds", 30),
-                ) as parser:
-                    playback_headers = parser.playback_headers()
-                    user_agent = playback_headers.get("User-Agent", "")
-                    referer = playback_headers.get("Referer", "")
-                self._db.update_stalker_headers(
-                    playlist_id, user_agent, referer
-                )
-                for channel in channels:
-                    if channel.source == "stalker":
-                        channel.user_agent = user_agent
-                        channel.referer = referer
-            self._distribute_channels(channels)
-            self._load_playlist_epg(playlist_id, channels)
-            self._ensure_catalog_for_tab(self._content_stack.currentIndex())
-            self._refresh_stalker_metadata_if_needed(
-                playlist_id, playlist_details, channels
-            )
-
-            playlists = self._playlist_controller.list()
-            pl_name = next(
-                (p["name"] for p in playlists if p["id"] == playlist_id),
-                "Playlist"
-            )
-            self.statusBar().showMessage(f"Playlist: {pl_name} | {len(channels)} itens")
-        except Exception as e:
-            self._logger.error(f"Failed to load channels: {e}")
-
-    def _refresh_stalker_metadata_if_needed(
-        self, playlist_id: int, playlist: Optional[dict], channels: list
-    ):
-        """Repair country/category metadata in already-saved Stalker playlists."""
-        if (
-            not playlist
-            or playlist.get("source_type") != "stalker"
-            or any(channel.country_code for channel in channels)
-            or playlist_id in self._stalker_metadata_loading
-        ):
-            return
-
-        self._stalker_metadata_loading.add(playlist_id)
-
-        def fetch_and_update():
-            with StalkerParser(
-                playlist["server_url"],
-                playlist["mac_address"],
-                timeout=self._settings.get("network_timeout_seconds", 30),
-            ) as parser:
-                refreshed = parser.get_full_playlist().channels
-            self._db.update_stalker_channel_metadata(playlist_id, refreshed)
-            return self._db.get_channels(playlist_id)
-
-        def on_success(refreshed):
-            self._stalker_metadata_loading.discard(playlist_id)
-            if self._current_playlist_id == playlist_id:
-                self._distribute_channels(refreshed)
-                self.statusBar().showMessage(
-                    "Canais organizados pelas categorias originais do portal."
-                )
-
-        def on_error(message):
-            self._stalker_metadata_loading.discard(playlist_id)
-            self._logger.warning(
-                f"Failed to refresh Stalker category metadata: {message}"
-            )
-
-        self._run_background(
-            fetch_and_update,
-            on_success,
-            on_error,
-            status_message="A organizar canais por região e categoria...",
-        )
-
-    @Slot(int)
-    def _on_playlist_deleted(self, playlist_id: int):
-        """Handle playlist deletion."""
-        try:
-            self._playlist_controller.delete(playlist_id)
-            self._load_playlists()
-            self._distribute_channels([])
-            self._epg_widget.clear()
-            self._discard_provider_sessions(playlist_id)
-            if self._current_playlist_id == playlist_id:
-                self._current_playlist_id = None
-            self._catalog_loading = {
-                key for key in self._catalog_loading if key[0] != playlist_id
-            }
-            self.statusBar().showMessage("Playlist eliminada.")
-        except Exception as e:
-            self._logger.error(f"Failed to delete playlist: {e}")
-            QMessageBox.critical(self, "Erro", f"Falha ao eliminar playlist: {e}")
-
-    @Slot(int, str)
-    def _on_playlist_renamed(self, playlist_id: int, new_name: str):
-        """Persist a user-selected playlist name and refresh the sidebar."""
-        try:
-            self._playlist_controller.rename(playlist_id, new_name)
-            self._load_playlists()
-            self._playlist_widget.select_playlist(playlist_id)
-            self.statusBar().showMessage(
-                f"Playlist alterada para: {new_name}"
-            )
-        except Exception as exc:
-            self._logger.error(f"Failed to rename playlist: {exc}")
-            QMessageBox.critical(
-                self, "Erro", f"Não foi possível alterar o nome: {exc}"
-            )
-
-    @Slot(int)
-    def _edit_playlist_connection(self, playlist_id: int):
-        details = self._db.get_playlist(playlist_id)
-        if not details:
-            return
-        source_type = details["source_type"]
-        if source_type in ("m3u", "m3u_plus"):
-            dialog = PlaylistDialog(self, details)
-        elif source_type == "xtream":
-            dialog = XtreamDialog(self, details)
-        elif source_type == "stalker":
-            dialog = StalkerDialog(self, details)
-        else:
-            QMessageBox.warning(self, "Ligação", "Tipo de playlist não suportado.")
-            return
-        if dialog.exec() != dialog.DialogCode.Accepted:
-            return
-
-        if source_type in ("m3u", "m3u_plus"):
-            connection_input = {
-                "name": dialog.playlist_name,
-                "url": dialog.playlist_url,
-                "file_path": dialog.playlist_path,
-                "epg": dialog.epg_source,
-            }
-        elif source_type == "xtream":
-            connection_input = {
-                "name": dialog.playlist_name,
-                "server_url": dialog.server_url,
-                "username": dialog.username,
-                "password": dialog.password,
-            }
-        else:
-            connection_input = {
-                "name": dialog.playlist_name,
-                "server_url": dialog.portal_url,
-                "mac_address": dialog.mac_address,
-            }
-
-        def test_connection():
-            if source_type in ("m3u", "m3u_plus"):
-                source = connection_input["file_path"] or connection_input["url"]
-                if not source:
-                    raise ValueError("Indica uma URL ou ficheiro M3U.")
-                parsed = M3UParser(
-                    timeout=self._settings.get("network_timeout_seconds", 30),
-                    user_agent=self._settings.get("user_agent", ""),
-                ).parse(source, connection_input["name"])
-                epg = connection_input["epg"]
-                epg_is_url = epg.startswith(("http://", "https://"))
-                return {
-                    "name": connection_input["name"],
-                    "url": connection_input["url"],
-                    "file_path": connection_input["file_path"],
-                    "epg_url": epg if epg_is_url else "",
-                    "epg_source": "" if epg_is_url else epg,
-                }, parsed.channels
-            if source_type == "xtream":
-                with XtreamParser(
-                    connection_input["server_url"],
-                    connection_input["username"],
-                    connection_input["password"],
-                    timeout=self._settings.get("network_timeout_seconds", 30),
-                ) as parser:
-                    parser.authenticate()
-                return {
-                    "name": connection_input["name"],
-                    "server_url": connection_input["server_url"],
-                    "username": connection_input["username"],
-                    "password": connection_input["password"],
-                }, None
-            with StalkerParser(
-                connection_input["server_url"],
-                connection_input["mac_address"],
-                timeout=self._settings.get("network_timeout_seconds", 30),
-            ) as parser:
-                parser.authenticate()
-            return {
-                "name": connection_input["name"],
-                "server_url": connection_input["server_url"],
-                "mac_address": connection_input["mac_address"],
-            }, None
-
-        def on_success(result):
-            values, parsed_channels = result
-            self._playlist_controller.update_connection(playlist_id, values)
-            if parsed_channels is not None:
-                for content_type, stream_types in (
-                    ("live", ("live",)),
-                    ("vod", ("vod", "movie")),
-                    ("series", ("series",)),
-                ):
-                    self._db.replace_catalog(
-                        playlist_id,
-                        content_type,
-                        [
-                            channel
-                            for channel in parsed_channels
-                            if channel.stream_type in stream_types
-                        ],
-                    )
-            self._discard_provider_sessions(playlist_id)
-            self._load_playlists()
-            self._playlist_widget.select_playlist(playlist_id)
-            self._on_playlist_selected(playlist_id)
-            self.statusBar().showMessage("Ligação testada e guardada.")
-
-        self._run_background(
-            test_connection,
-            on_success,
-            status_message="A testar ligação antes de guardar...",
-            context_playlist_id=playlist_id,
-        )
 
     @Slot()
     def _show_settings(self):
@@ -1788,46 +946,6 @@ class MainWindow(PlaybackMixin, SessionStateMixin, QMainWindow):
             )
 
     @Slot()
-    def _check_for_updates(self):
-        """Check the configured manifest for a newer release."""
-        url = (self._settings.get("update_manifest_url") or "").strip()
-        if not url:
-            QMessageBox.information(
-                self,
-                "Atualizações",
-                "Não foi configurado um repositório de atualizações.\n"
-                "Define o URL do manifesto em Definições → Rede → "
-                "URL do manifesto de atualizações.",
-            )
-            return
-
-        def fetch():
-            return fetch_manifest(url, timeout=15)
-
-        def show(info):
-            if is_newer_version(info.version, APP_VERSION):
-                QMessageBox.information(
-                    self,
-                    "Atualização disponível",
-                    f"Está disponível a versão {info.version}\n"
-                    f"(atual: {APP_VERSION}).",
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "Atualizações",
-                    f"Estás a usar a versão mais recente ({APP_VERSION}).",
-                )
-
-        def fail(message):
-            QMessageBox.warning(
-                self, "Atualizações", f"Não foi possível verificar: {message}"
-            )
-
-        self._run_background(
-            fetch, show, fail, status_message="A verificar atualizações..."
-        )
-
     def resizeEvent(self, event):
         """Keep the toast anchored when the window is resized."""
         super().resizeEvent(event)

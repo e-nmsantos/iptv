@@ -35,6 +35,7 @@ class PosterCardDelegate(QStyledItemDelegate):
         favorite_fn: Optional[Callable[[QModelIndex], bool]] = None,
         live_fn: Optional[Callable[[QModelIndex], bool]] = None,
         progress_fn: Optional[Callable[[QModelIndex], Optional[float]]] = None,
+        playing_fn: Optional[Callable[[QModelIndex], bool]] = None,
     ):
         super().__init__(parent)
         self._card_size = card_size or QSize(160, 130)
@@ -42,6 +43,7 @@ class PosterCardDelegate(QStyledItemDelegate):
         self._favorite_fn = favorite_fn
         self._live_fn = live_fn
         self._progress_fn = progress_fn
+        self._playing_fn = playing_fn
 
         # Built once (not per paint() call) since font construction/metrics
         # aren't free and paint() runs for every visible card on every
@@ -71,6 +73,7 @@ class PosterCardDelegate(QStyledItemDelegate):
         path.addRoundedRect(card_rect, radius, radius)
         painter.setClipPath(path)
 
+        is_playing = bool(self._playing_fn and self._playing_fn(index))
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         is_hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
@@ -86,14 +89,17 @@ class PosterCardDelegate(QStyledItemDelegate):
             pixmap = get_image_loader().load(image_url, size)
 
         if pixmap is not None and not pixmap.isNull():
-            scaled = pixmap.scaled(
-                poster_rect.size().toSize(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = poster_rect.left() - (scaled.width() - poster_rect.width()) / 2
-            y = poster_rect.top() - (scaled.height() - poster_rect.height()) / 2
-            painter.drawPixmap(int(x), int(y), scaled)
+            pw, ph = pixmap.width(), pixmap.height()
+            rw, rh = poster_rect.width(), poster_rect.height()
+            if pw > 0 and ph > 0 and rw > 0 and rh > 0:
+                scale = max(rw / pw, rh / ph)
+                sw = rw / scale
+                sh = rh / scale
+                sx = (pw - sw) / 2
+                sy = (ph - sh) / 2
+                painter.drawPixmap(poster_rect, pixmap, QRectF(sx, sy, sw, sh))
+            else:
+                painter.drawPixmap(poster_rect.toRect(), pixmap)
         else:
             painter.fillRect(poster_rect, QColor(_monogram_color(title)))
             painter.setPen(QColor(Palette.TEXT_ON_ACCENT))
@@ -105,7 +111,7 @@ class PosterCardDelegate(QStyledItemDelegate):
             card_rect.left(), poster_rect.bottom(), card_rect.width(),
             card_rect.height() - poster_h,
         )
-        body_color = QColor(Palette.BG_CARD_HOVER if (is_selected or is_hover) else Palette.BG_CARD)
+        body_color = QColor(Palette.BG_CARD_HOVER if (is_selected or is_hover or is_playing) else Palette.BG_CARD)
         painter.fillRect(body_rect, body_color)
 
         # Title legibility gradient over the bottom of the poster.
@@ -115,7 +121,9 @@ class PosterCardDelegate(QStyledItemDelegate):
         painter.fillRect(poster_rect, QBrush(gradient))
 
         # Badges.
-        if self._live_fn and self._live_fn(index):
+        if is_playing:
+            _draw_badge(painter, poster_rect, "▶ A REPRODUZIR", Palette.SUCCESS_GREEN, self._badge_font, left=True)
+        elif self._live_fn and self._live_fn(index):
             _draw_badge(painter, poster_rect, "AO VIVO", Palette.LIVE_BADGE, self._badge_font, left=True)
         if self._favorite_fn and self._favorite_fn(index):
             _draw_star(painter, poster_rect, self._star_font)
@@ -132,7 +140,13 @@ class PosterCardDelegate(QStyledItemDelegate):
         elided = metrics.elidedText(title, Qt.TextElideMode.ElideRight, int(text_rect.width()))
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
 
-        if is_selected:
+        if is_playing:
+            pen = QPen(QColor(Palette.SUCCESS_GREEN))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(card_rect.adjusted(1, 1, -1, -1), radius, radius)
+        elif is_selected:
             pen = QPen(QColor(Palette.ACCENT))
             pen.setWidth(2)
             painter.setPen(pen)
@@ -158,12 +172,14 @@ class ChannelRowDelegate(QStyledItemDelegate):
         favorite_fn: Optional[Callable[[QModelIndex], bool]] = None,
         live_fn: Optional[Callable[[QModelIndex], bool]] = None,
         progress_fn: Optional[Callable[[QModelIndex], Optional[float]]] = None,
+        playing_fn: Optional[Callable[[QModelIndex], bool]] = None,
     ):
         super().__init__(parent)
         self._row_height = row_height
         self._favorite_fn = favorite_fn
         self._live_fn = live_fn
         self._progress_fn = progress_fn
+        self._playing_fn = playing_fn
 
         self._title_font = QFont()
         self._title_font.setPointSize(10)
@@ -184,10 +200,11 @@ class ChannelRowDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         row_rect = QRectF(option.rect).adjusted(4, 2, -4, -2)
+        is_playing = bool(self._playing_fn and self._playing_fn(index))
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         is_hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
-        if is_selected or is_hover:
+        if is_selected or is_hover or is_playing:
             bg_path = QPainterPath()
             bg_path.addRoundedRect(row_rect, 6, 6)
             painter.fillPath(bg_path, QColor(Palette.BG_CARD_HOVER))
@@ -214,14 +231,18 @@ class ChannelRowDelegate(QStyledItemDelegate):
             pixmap = get_image_loader().load(image_url, size)
 
         if pixmap is not None and not pixmap.isNull():
-            scaled = pixmap.scaled(
-                thumb_rect.size().toSize(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = thumb_rect.left() - (scaled.width() - thumb_rect.width()) / 2
-            y = thumb_rect.top() - (scaled.height() - thumb_rect.height()) / 2
-            painter.drawPixmap(int(x), int(y), scaled)
+            pw, ph = pixmap.width(), pixmap.height()
+            tw = thumb_rect.width()
+            th = thumb_rect.height()
+            if pw > 0 and ph > 0 and tw > 0 and th > 0:
+                scale = max(tw / pw, th / ph)
+                sw = tw / scale
+                sh = th / scale
+                sx = (pw - sw) / 2
+                sy = (ph - sh) / 2
+                painter.drawPixmap(thumb_rect, pixmap, QRectF(sx, sy, sw, sh))
+            else:
+                painter.drawPixmap(thumb_rect.toRect(), pixmap)
         else:
             painter.fillRect(thumb_rect, QColor(_monogram_color(title)))
             painter.setPen(QColor(Palette.TEXT_ON_ACCENT))
@@ -245,7 +266,24 @@ class ChannelRowDelegate(QStyledItemDelegate):
             painter.drawText(star_rect, Qt.AlignmentFlag.AlignCenter, "★")
             right_edge -= 24
 
-        if is_live:
+        if is_playing:
+            painter.setFont(self._badge_font)
+            metrics = painter.fontMetrics()
+            text = "▶ A REPRODUZIR"
+            badge_w = metrics.horizontalAdvance(text) + 10
+            badge_rect = QRectF(
+                right_edge - badge_w,
+                row_rect.top() + (row_rect.height() - metrics.height() - 4) / 2,
+                badge_w,
+                metrics.height() + 4,
+            )
+            badge_path = QPainterPath()
+            badge_path.addRoundedRect(badge_rect, 3, 3)
+            painter.fillPath(badge_path, QColor(Palette.SUCCESS_GREEN))
+            painter.setPen(QColor(Palette.TEXT_ON_ACCENT))
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, text)
+            right_edge -= badge_w + 8
+        elif is_live:
             painter.setFont(self._badge_font)
             metrics = painter.fontMetrics()
             text = "AO VIVO"
@@ -272,7 +310,13 @@ class ChannelRowDelegate(QStyledItemDelegate):
         elided = metrics.elidedText(title, Qt.TextElideMode.ElideRight, max(0, int(text_rect.width())))
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
 
-        if is_selected:
+        if is_playing:
+            pen = QPen(QColor(Palette.SUCCESS_GREEN))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(row_rect.adjusted(1, 1, -1, -1), 6, 6)
+        elif is_selected:
             pen = QPen(QColor(Palette.ACCENT))
             pen.setWidth(2)
             painter.setPen(pen)

@@ -30,3 +30,10 @@ keyring>=25.0.0
 
 # Validação de URLs
 validators>=0.22.0
+
+# Transmissão para Chromecast e Smart TVs
+# Python 3.9/3.10 ficam nas últimas versões compatíveis (pychromecast 14 exige 3.11).
+pychromecast>=14.0.0; python_version >= "3.11"
+pychromecast>=13.1.0,<14; python_version < "3.11"
+zeroconf>=0.150.0; python_version >= "3.10"
+zeroconf>=0.132.0,<0.150; python_version < "3.10"

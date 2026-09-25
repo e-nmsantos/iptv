@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 import requests
@@ -108,3 +109,78 @@ def verify_artifact(path: Path, artifact: ReleaseArtifact) -> bool:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest().lower() == artifact.sha256
+
+
+MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024  # 1 GiB sanity cap
+
+
+def select_artifact(info: ReleaseInfo) -> Optional[ReleaseArtifact]:
+    """Pick the best artifact for the current platform, or None if unsupported."""
+    import platform as _platform
+
+    system = _platform.system().lower()
+    machine = _platform.machine().lower()
+    candidates = [artifact for artifact in info.artifacts if artifact.platform]
+
+    if system == "windows":
+        for artifact in candidates:
+            if artifact.platform == "windows-x86_64-installer":
+                return artifact
+        for artifact in candidates:
+            if artifact.platform.startswith("windows"):
+                return artifact
+    elif system == "darwin":
+        arch = "arm64" if machine in ("arm64", "aarch64") else "x86_64"
+        preferred = f"macos-{arch}"
+        for artifact in candidates:
+            if artifact.platform == preferred:
+                return artifact
+        for artifact in candidates:
+            if artifact.platform.startswith("macos"):
+                return artifact
+    return None
+
+
+def download_artifact(
+    artifact: ReleaseArtifact,
+    dest_dir: Path,
+    progress: Optional[object] = None,
+) -> Path:
+    """Download an artifact to ``dest_dir``, verifying size and SHA-256.
+
+    ``progress`` is an optional ``callable(downloaded_bytes, total_bytes)``
+    invoked from the calling thread while streaming.
+    """
+    if not artifact.url or urlparse(artifact.url).scheme != "https":
+        raise ValueError("Artefacto de atualização sem URL HTTPS.")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    destination = dest_dir / artifact.filename
+    partial = destination.with_suffix(destination.suffix + ".part")
+
+    response = requests.get(artifact.url, timeout=(15, 300), stream=True)
+    response.raise_for_status()
+    declared = int(response.headers.get("Content-Length", 0) or 0)
+    if declared and (declared > MAX_ARTIFACT_BYTES or declared != artifact.size):
+        raise ValueError("O tamanho do artefacto remoto não coincide com o esperado.")
+
+    downloaded = 0
+    with partial.open("wb") as file:
+        for chunk in response.iter_content(1024 * 1024):
+            if not chunk:
+                continue
+            downloaded += len(chunk)
+            if downloaded > MAX_ARTIFACT_BYTES:
+                raise ValueError("Artefacto de atualização demasiado grande.")
+            file.write(chunk)
+            if progress is not None:
+                progress(downloaded, artifact.size)
+
+    if downloaded != artifact.size:
+        partial.unlink(missing_ok=True)
+        raise ValueError("O artefacto descarregado está incompleto.")
+    partial.replace(destination)
+
+    if not verify_artifact(destination, artifact):
+        destination.unlink(missing_ok=True)
+        raise ValueError("A verificação de integridade do artefacto falhou.")
+    return destination

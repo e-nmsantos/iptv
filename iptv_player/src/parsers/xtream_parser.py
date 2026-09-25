@@ -35,12 +35,25 @@ class XtreamParser:
     /player_api.php?username={user}&password={pass}&action={action}
     """
 
-    def __init__(self, server_url: str, username: str, password: str, timeout: int = 30):
+    def __init__(
+        self,
+        server_url: str,
+        username: str,
+        password: str,
+        timeout: int = 30,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+        **kwargs,
+    ):
         self._base_url = self._normalize_url(server_url)
         self._username = username
         self._password = password
         self._timeout = max(5, int(timeout))
-        self._session = HttpSession(timeout=self._timeout)
+        self._cancel_requested = cancel_requested or (lambda: False)
+        self._session = HttpSession(
+            timeout=self._timeout,
+            retries=0,
+            cancel_requested=self._cancel_requested,
+        )
         self._session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json",
@@ -279,19 +292,30 @@ class XtreamParser:
         seasons = info.get("episodes", {})
 
         for season_num, ep_list in seasons.items():
+            try:
+                s_int = int(season_num)
+            except (ValueError, TypeError):
+                s_int = 0
             for ep in ep_list if isinstance(ep_list, list) else []:
+                if not isinstance(ep, dict):
+                    continue
+                info_dict = ep.get("info") or {}
+                try:
+                    ep_num = int(ep.get("episode_num", 0))
+                except (ValueError, TypeError):
+                    ep_num = 0
                 channel = Channel(
                     name=ep.get("title", "Unknown"),
                     url=self._build_stream_url(
                         ep.get("id", ""), "series", ep.get("container_extension", "mp4")
                     ),
-                    group=f"Series - S{int(season_num):02d}",
-                    logo=ep.get("info", {}).get("movie_image", ""),
+                    group=f"Series - S{s_int:02d}",
+                    logo=info_dict.get("movie_image", "") if isinstance(info_dict, dict) else "",
                     stream_type="series",
                     source="xtream",
                     xtream_id=str(ep.get("id", "")),
-                    season_number=int(season_num),
-                    episode_number=ep.get("episode_num", 0),
+                    season_number=s_int,
+                    episode_number=ep_num,
                     container_extension=ep.get("container_extension", "mp4"),
                 )
                 episodes.append(channel)
@@ -448,10 +472,6 @@ class XtreamParser:
             username=self._username,
             password=self._password,
         )
-
-        # Get user info for total counts
-        user_info = self._info.get("user_info", {})
-        playlist.total_channels = user_info.get("max_connections", 0)
 
         # Add live channels
         try:

@@ -130,7 +130,7 @@ interface RoomCatalogDao {
              AND (:groupName = 'Todos' OR group_name = :groupName)
              AND (:query = '' OR instr(lower(name), lower(:query)) > 0
                   OR instr(lower(group_name), lower(:query)) > 0)
-           ORDER BY group_name COLLATE NOCASE, name COLLATE NOCASE, id
+           ORDER BY name COLLATE NOCASE, id
            LIMIT :limit OFFSET :offset""",
     )
     fun observePage(
