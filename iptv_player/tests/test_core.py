@@ -2243,6 +2243,11 @@ class NewFeaturesTests(unittest.TestCase):
         ch1 = Channel(database_id=1, name="RTP 1", stream_type="live", url="http://example.com/rtp1.ts")
         ch2 = Channel(database_id=2, name="SIC", stream_type="live", url="http://example.com/sic.ts")
 
+        # Each multiview slot creates a MediaPlayer; keep libvlc out of the test.
+        vlc_patch = patch("src.player.media_player.vlc.Instance", return_value=MagicMock())
+        vlc_patch.start()
+        self.addCleanup(vlc_patch.stop)
+
         mv_dialog = MultiViewDialog(channels=[ch1, ch2], initial_channel=ch1)
         self.assertIsNotNone(mv_dialog)
         mv_dialog._set_layout(4)

@@ -86,6 +86,12 @@ class MediaPlayerAndCastTest(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls._app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        # Never start a real libvlc instance: headless CI runners cannot rely on it.
+        patcher = patch("src.player.media_player.vlc.Instance", return_value=MagicMock())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_media_player_vlc_instance_property(self):
         player = MediaPlayer()
         self.assertEqual(player.vlc_instance, player._instance)
