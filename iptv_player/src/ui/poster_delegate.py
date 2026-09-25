@@ -322,7 +322,6 @@ class ChannelRowDelegate(QStyledItemDelegate):
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(row_rect.adjusted(1, 1, -1, -1), 6, 6)
-            painter.drawRoundedRect(row_rect.adjusted(1, 1, -1, -1), 6, 6)
 
         progress = self._progress_fn(index) if self._progress_fn else None
         if progress is not None and progress > 0:

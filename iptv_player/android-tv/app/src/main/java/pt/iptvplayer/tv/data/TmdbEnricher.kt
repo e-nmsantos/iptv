@@ -5,6 +5,7 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import pt.iptvplayer.tv.BuildConfig
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -20,13 +21,14 @@ data class TmdbMovieInfo(
 
 class TmdbEnricher(
     private val context: Context,
-    private val apiKey: String = "b728b6d396a84976c66cf17f6984e1b7",
+    // Injected at build time (-PTMDB_API_KEY=...); never commit a key here.
+    private val apiKey: String = BuildConfig.TMDB_API_KEY,
 ) {
     private val memoryCache = mutableMapOf<String, TmdbMovieInfo>()
 
     suspend fun fetchMovieInfo(rawTitle: String): TmdbMovieInfo? = withContext(Dispatchers.IO) {
         val cleanTitle = cleanTitle(rawTitle)
-        if (cleanTitle.isBlank()) return@withContext null
+        if (apiKey.isBlank() || cleanTitle.isBlank()) return@withContext null
         val cacheKey = cleanTitle.lowercase()
 
         memoryCache[cacheKey]?.let { return@withContext it }

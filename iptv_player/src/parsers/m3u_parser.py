@@ -1,6 +1,7 @@
 """M3U / M3U8 / M3U_Plus playlist parser."""
 
 import gzip
+import io
 import json
 import re
 import unicodedata
@@ -258,7 +259,11 @@ class M3UParser:
 
         raw = path.read_bytes()
         if str(file_path).lower().endswith(".gz") or raw.startswith(b"\x1f\x8b"):
-            raw = gzip.decompress(raw)
+            # Bounded read: a small gzip must not expand past the size limit.
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                raw = gz.read(self.MAX_DOWNLOAD_BYTES + 1)
+            if len(raw) > self.MAX_DOWNLOAD_BYTES:
+                raise ValueError("A playlist excede o limite de 100 MB.")
         content = raw.decode("utf-8", errors="replace")
         clean_name = path.name
         if clean_name.lower().endswith(".gz"):

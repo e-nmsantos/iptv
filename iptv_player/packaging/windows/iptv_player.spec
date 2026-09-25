@@ -22,7 +22,6 @@ analysis = Analysis(
         "src.core.metadata_enricher",
         "src.core.server_speedtest",
         "src.core.subtitles_finder",
-        "src.core.device_discovery",
         "src.core.cast_manager",
         "src.core.downloader",
         "src.core.playlist_health",

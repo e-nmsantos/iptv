@@ -583,10 +583,12 @@ class PlayerWidget(QWidget):
     def _toggle_pip(self, checked: bool):
         if checked:
             size = QSize(*(self._settings.get("pip_window_size", [360, 202]) if self._settings else [360, 202]))
-            self._pip_window = PiPWindow(size)
+            self._pip_window = PiPWindow()
+            self._pip_window.resize(size)
             self._pip_window.closed.connect(self._on_pip_closed)
+            self._pip_window.restore_requested.connect(self._on_pip_closed)
             self._pip_window.show()
-            self._media_player.set_video_widget(self._pip_window.video_frame)
+            self._media_player.set_video_widget(self._pip_window.video_container)
         elif self._pip_window is not None:
             self._media_player.set_video_widget(self._video_frame)
             self._pip_window.close()
@@ -594,9 +596,11 @@ class PlayerWidget(QWidget):
 
     @Slot()
     def _on_pip_closed(self):
-        self._pip_window = None
+        window, self._pip_window = self._pip_window, None
         self._media_player.set_video_widget(self._video_frame)
         self._pip_action.setChecked(False)
+        if window is not None:
+            window.deleteLater()
 
     def close_pip(self):
         """Close any active PiP window (e.g. on application shutdown)."""

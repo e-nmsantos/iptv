@@ -191,6 +191,10 @@ class VODDownloader(QObject):
                     task.total_bytes = int(content_len)
                     existing_size = 0
 
+            if resp.status_code == 200:
+                # Server ignored Range: the partial file is rewritten from scratch.
+                existing_size = 0
+                task.downloaded_bytes = 0
             mode = "ab" if resp.status_code == 206 else "wb"
             chunk_size = 64 * 1024  # 64 KB
 

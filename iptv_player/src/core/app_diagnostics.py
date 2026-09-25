@@ -86,7 +86,7 @@ def build_diagnostics_report(
 
     lines.append("")
     lines.append("[Base de dados]")
-    lines.append(f"  caminho: {db_path}")
+    lines.append(f"  ficheiro: {db_path.name}")  # name only: full path reveals the user
     try:
         size_mib = db_path.stat().st_size / 1024 / 1024
         lines.append(f"  tamanho: {size_mib:.2f} MiB")

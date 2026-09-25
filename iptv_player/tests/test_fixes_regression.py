@@ -642,6 +642,55 @@ class PlayerWidgetUiTests(unittest.TestCase):
         self.assertIs(m3u._should_cancel, cancel_cb)
 
 
+class ReviewFindingsRegressionTests(unittest.TestCase):
+    def test_gzip_playlist_is_limited_after_decompression(self):
+        import gzip
+
+        from src.parsers.m3u_parser import M3UParser
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "big.m3u.gz"
+            path.write_bytes(gzip.compress(b"#EXTM3U\n" + b"x" * 5000))
+            parser = M3UParser()
+            parser.MAX_DOWNLOAD_BYTES = 1000  # compressed file is far smaller than this
+            with self.assertRaises(ValueError):
+                parser.parse(str(path))
+
+    def test_recordings_started_together_get_distinct_files(self):
+        from src.player.pvr_recorder import PvrRecorderManager, RecordingSession
+
+        with tempfile.TemporaryDirectory() as temp_dir,                 patch.object(RecordingSession, "start"),                 patch("src.player.pvr_recorder.datetime") as fake_datetime:
+            fake_datetime.now.return_value.strftime.return_value = "20260101_000000_000000"
+            manager = PvrRecorderManager(Path(temp_dir))
+            first = manager.start_recording("RTP 1", "http://example.com/a.ts")
+            second = manager.start_recording("RTP 1", "http://example.com/a.ts")
+            self.assertNotEqual(first.output_file, second.output_file)
+
+    def test_movie_stream_type_counts_as_vod(self):
+        from src.core.channel import Channel
+        from src.core.playlist import Playlist
+
+        playlist = Playlist(name="Test", source_type="xtream")
+        movie = Channel(name="Filme", url="http://example.com/f.mp4", stream_type="movie")
+        playlist.add_channel(movie)
+        self.assertEqual(playlist.total_vod, 1)
+        playlist.remove_channel(movie)
+        self.assertEqual(playlist.total_vod, 0)
+
+    def test_pip_window_emits_closed_and_exposes_video_container(self):
+        from PySide6.QtWidgets import QApplication
+
+        from src.ui.pip_window import PiPWindow
+
+        QApplication.instance() or QApplication([])
+        window = PiPWindow()
+        closed = MagicMock()
+        window.closed.connect(closed)
+        self.assertIsNotNone(window.video_container)
+        window.show()
+        window.close()
+        closed.assert_called_once()
+
 if __name__ == '__main__':
     unittest.main()
 

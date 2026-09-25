@@ -65,7 +65,7 @@ internal fun ChannelGuide(
             .distinct().sortedBy { it.lowercase() }.toList()
     }
     val filteredChannels = remember(channels, selectedCategory) {
-        if (selectedCategory == "Todos") channels else channels.filter { it.group == selectedCategory }
+        if (selectedCategory == "Todos") channels else channels.filter { it.group.ifBlank { "Geral" } == selectedCategory }
     }
     val currentIndex = filteredChannels.indexOfFirst { sameChannel(it, current) }.coerceAtLeast(0)
     val listState = rememberLazyListState()

@@ -105,10 +105,14 @@ class PipFloatingWindow(QWidget):
             self._on_restore()
 
     def _handle_close(self):
-        self.hide()
+        self.close()
+
+    def closeEvent(self, event):
+        # Also covers closes not started by our button (Alt+F4, app shutdown).
         self.closed.emit()
         if self._on_close:
             self._on_close()
+        super().closeEvent(event)
 
 
 # Alias for backward compatibility

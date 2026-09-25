@@ -94,9 +94,7 @@ class ProviderSessionManager:
             playlist_ids = set(self._stalker) | set(self._xtream)
             for cached_id in playlist_ids:
                 self._close_session(cached_id)
-            # The application is shutting down: nothing else needs the locks.
-            self._stalker_locks.clear()
-            self._xtream_locks.clear()
+            # Lock objects are kept on purpose: a deferred close may still hold one.
             return
         self._close_session(playlist_id)
 

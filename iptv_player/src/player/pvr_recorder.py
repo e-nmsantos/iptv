@@ -122,10 +122,14 @@ class PvrRecorderManager:
         headers: Optional[dict] = None,
     ) -> RecordingSession:
         """Create and start a new background recording session."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         safe_name = sanitize_filename(channel_name) or "stream"
-        filename = f"{safe_name}_{timestamp}.ts"
-        out_path = self.output_dir / filename
+        out_path = self.output_dir / f"{safe_name}_{timestamp}.ts"
+        taken = {s.output_file for s in self._active_sessions}
+        suffix = 1
+        while out_path in taken or out_path.exists():
+            out_path = self.output_dir / f"{safe_name}_{timestamp}_{suffix}.ts"
+            suffix += 1
 
         session = RecordingSession(
             stream_url=stream_url,
