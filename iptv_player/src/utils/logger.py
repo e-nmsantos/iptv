@@ -7,7 +7,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _QUERY_SECRET = re.compile(
-    r"(?i)([?&](?:username|password|token|auth|mac)=)[^&\s]+"
+    r"(?i)([?&](?:username|password|token|play_token|auth|mac)=)[^&\s]+"
 )
 _XTREAM_PATH_SECRET = re.compile(
     r"(?i)(/(?:live|movie|series)/)[^/\s]+/[^/\s]+/"
@@ -93,6 +93,17 @@ def setup_logger(name: str = "iptv_player") -> logging.Logger:
         logger.addHandler(file_handler)
     except Exception as e:
         logger.warning(f"Could not create file handler: {e}")
+
+    # Modules log through logging.getLogger(__name__) ("src.core...", "config..."),
+    # which are not children of this logger; route them to the same handlers.
+    if name == "iptv_player":
+        for package in ("src", "config"):
+            package_logger = logging.getLogger(package)
+            if not package_logger.handlers:
+                package_logger.setLevel(logging.DEBUG)
+                package_logger.propagate = False
+                for handler in logger.handlers:
+                    package_logger.addHandler(handler)
 
     return logger
 

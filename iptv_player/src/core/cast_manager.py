@@ -27,6 +27,16 @@ def get_local_ip() -> str:
         return "127.0.0.1"
 
 
+def _same_device_name(a: str, b: str) -> bool:
+    """Compare display names exactly, ignoring the 📺 prefix and case.
+
+    Substring matching paired a Chromecast called just "TV" with "[TV] Samsung".
+    """
+    def norm(name: str) -> str:
+        return name.replace("📺", "").strip().casefold()
+    return norm(a) == norm(b)
+
+
 @dataclass
 class CastDevice:
     device_id: str
@@ -471,9 +481,17 @@ class CastManager(QObject):
             )
 
             with self._lock:
-                if dev_id not in self._devices:
-                    self._devices[dev_id] = device
-                    self.device_found.emit(device)
+                if dev_id in self._devices:
+                    return
+                # A Google/Android TV also answers as a DLNA renderer: keep one
+                # entry and remember the DLNA control URL as a fallback.
+                for existing in self._devices.values():
+                    if _same_device_name(existing.name, device.name):
+                        if not existing.control_url:
+                            existing.control_url = control_url
+                        return
+                self._devices[dev_id] = device
+                self.device_found.emit(device)
         except Exception as e:
             logger.debug("Failed to resolve UPnP device from %s: %s", location_url, e)
 
@@ -500,7 +518,10 @@ class CastManager(QObject):
                         ctypes.byref(event.u), ctypes.POINTER(ctypes.c_void_p)
                     ).contents.value
                     if raw_ptr:
+                        # libVLC frees the item after this callback unless it is
+                        # held; we keep it to hand to the media player later.
                         r_item = vlc.Renderer(raw_ptr)
+                        r_item = r_item.hold() or r_item
                         name_raw = r_item.name()
                         name = (
                             name_raw.decode("utf-8", errors="ignore")
@@ -520,11 +541,10 @@ class CastManager(QObject):
                             self._vlc_renderers[name] = r_item
                             matched = False
                             for existing in self._devices.values():
-                                if (
-                                    name.lower() in existing.name.lower()
-                                    or existing.name.lower() in name.lower()
-                                ):
+                                if _same_device_name(existing.name, name):
                                     existing.vlc_renderer = r_item
+                                    if dtype == "chromecast":
+                                        existing.device_type = "chromecast"
                                     matched = True
                                     break
                             if not matched:
@@ -577,10 +597,7 @@ class CastManager(QObject):
         if not vlc_renderer:
             with self._lock:
                 for r_name, r_item in self._vlc_renderers.items():
-                    if (
-                        r_name.lower() in device.name.lower()
-                        or device.name.lower() in r_name.lower()
-                    ):
+                    if _same_device_name(r_name, device.name):
                         vlc_renderer = r_item
                         device.vlc_renderer = r_item
                         break
@@ -597,7 +614,13 @@ class CastManager(QObject):
                 try:
                     import vlc
 
-                    inst_args = ["--quiet", "--no-video-title-show"]
+                    from ..player.media_player import pick_chromecast_http_port
+
+                    inst_args = [
+                        "--quiet",
+                        "--no-video-title-show",
+                        f"--sout-chromecast-http-port={pick_chromecast_http_port()}",
+                    ]
                     if headers and headers.get("User-Agent"):
                         inst_args.append(f"--http-user-agent={headers['User-Agent']}")
                     inst = vlc.Instance(inst_args)
@@ -678,10 +701,12 @@ class CastManager(QObject):
                         raise RuntimeError(f"Could not connect to Chromecast at {device.location}")
                 except Exception as ex:
                     logger.error("Failed to cast to Chromecast %s: %s", device.name, ex)
+                    if self._active_device is device:
+                        self._active_device = None
                     self.casting_state_changed.emit(False, "")
 
+            # The worker reports success only once the Chromecast accepted the media.
             threading.Thread(target=chromecast_play_worker, daemon=True).start()
-            self.casting_state_changed.emit(True, device.name)
             return True
 
         # 2. DLNA AVTransport playback for Smart TVs

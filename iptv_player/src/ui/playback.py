@@ -194,7 +194,10 @@ class PlaybackMixin:
             try:
                 from ..core.cast_manager import CastManager
                 cast_mgr = CastManager.get_instance()
-                if cast_mgr.is_casting and cast_mgr.active_device:
+                # When the main VLC player itself feeds the TV (renderer or sout),
+                # the play() above already switched the channel there.
+                player_casts = self._media_player.has_renderer() or self._media_player.is_casting_active()
+                if cast_mgr.is_casting and cast_mgr.active_device and not player_casts:
                     cast_mgr.cast_to_device(
                         cast_mgr.active_device,
                         channel.url,
