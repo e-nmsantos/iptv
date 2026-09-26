@@ -2,6 +2,7 @@
 
 import logging
 import os
+import socket
 import sys
 from pathlib import Path
 from typing import Optional
@@ -19,6 +20,23 @@ _STABLE_RESET_TICKS = 30             # ~15s of stable playback -> restore retry 
 _SEEK_TOLERANCE_MS = 2500
 _MAX_SEEK_RETRIES = 6
 _MAX_SUBTITLE_RETRIES = 6
+
+# Port VLC serves the stream on for a Chromecast. VLC's default (8010) often
+# falls inside ranges Windows reserves for Hyper-V/WSL, where binding fails
+# with "Access denied" and casting silently does nothing.
+CHROMECAST_HTTP_PORTS = (8010, 18010, 28010, 38010)
+
+
+def pick_chromecast_http_port(candidates=CHROMECAST_HTTP_PORTS) -> int:
+    """Return the first candidate port this machine lets us listen on."""
+    for port in candidates:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("0.0.0.0", port))
+            except OSError:
+                continue
+        return port
+    return candidates[0]
 
 
 class MediaPlayer(QObject):
@@ -116,6 +134,8 @@ class MediaPlayer(QObject):
 
     def _init_vlc(self, vlc_path: str = ""):
         """Initialize VLC instance with appropriate options."""
+        cast_port = pick_chromecast_http_port()
+        logger.info("Chromecast HTTP port: %d", cast_port)
         vlc_args = [
             "--no-xlib",
             "--quiet",
@@ -131,6 +151,7 @@ class MediaPlayer(QObject):
             # standard VLC fix for network streams that "freeze" a lot.
             "--clock-synchro=0",
             "--cr-average=1000",
+            f"--sout-chromecast-http-port={cast_port}",
         ]
         if getattr(self, "_normalize_audio", True):
             vlc_args.extend(["--audio-filter=normvol", "--norm-max-level=2.0"])
@@ -200,27 +221,62 @@ class MediaPlayer(QObject):
 
     def set_renderer(self, renderer_item) -> bool:
         """Direct playback output to a Chromecast / DLNA renderer."""
+        if not (self._player and renderer_item):
+            return False
+        if not self._apply_renderer(renderer_item):
+            return False
         self._current_renderer = renderer_item
-        if self._player and renderer_item:
-            try:
-                res = self._player.set_renderer(renderer_item)
-                logger.info("Set renderer on VLC player, result=%s", res)
-                return res == 0
-            except Exception as ex:
-                logger.warning("Failed to set renderer: %s", ex)
-        return False
+        return True
 
     def clear_renderer(self) -> bool:
         """Reset playback output to the local PC display."""
+        if not self._player:
+            return False
+        had_renderer = getattr(self, "_current_renderer", None) is not None
         self._current_renderer = None
-        if self._player:
+        return self._apply_renderer(None) if had_renderer else True
+
+    def _apply_renderer(self, renderer_item) -> bool:
+        """Switch VLC's output and reopen the current stream so it takes effect.
+
+        libVLC only honours set_renderer() before playback starts; on media that
+        is already playing it returns success but keeps rendering locally.
+        """
+        # Reopening restarts the input, so carry over what the user had chosen.
+        resume_ms = None
+        if not self._current_is_live:
             try:
-                res = self._player.set_renderer(None)
-                logger.info("Cleared renderer on VLC player, result=%s", res)
-                return res == 0
-            except Exception as ex:
-                logger.warning("Failed to clear renderer: %s", ex)
-        return False
+                resume_ms = int(self._player.get_time())
+            except Exception:
+                resume_ms = None
+        subtitle_track = self._requested_subtitle_track
+        if subtitle_track is None:
+            current = self.get_subtitle_track()
+            subtitle_track = current if current > 0 else None
+        subtitle_file = getattr(self, "_external_subtitle_path", None)
+
+        try:
+            self._player.stop()
+            res = self._player.set_renderer(renderer_item)
+        except Exception as ex:
+            logger.warning("Failed to set renderer: %s", ex)
+            return False
+        logger.info("Set renderer on VLC player (%s), result=%s", bool(renderer_item), res)
+        if res != 0:
+            return False
+        if self._current_url:
+            self.play(
+                url=self._current_url,
+                custom_headers=self._current_headers,
+                is_live=self._current_is_live,
+            )
+            if subtitle_file:
+                self.add_subtitle_file(subtitle_file)
+            elif subtitle_track is not None:
+                self.set_subtitle_track(subtitle_track)
+            if resume_ms and resume_ms > 1000:
+                self.set_time(resume_ms)
+        return True
 
     def get_renderer(self):
         """Return the currently attached VLC renderer, if any."""
@@ -288,6 +344,9 @@ class MediaPlayer(QObject):
             return
 
         if url:
+            if url != self._current_url:
+                # A subtitle file belongs to the item it was loaded for.
+                self._external_subtitle_path = None
             self._current_url = url
             if not self._retrying:
                 self._retry_scheduled = False
@@ -330,8 +389,10 @@ class MediaPlayer(QObject):
                     else:
                         options.append(f":file-caching={cache_ms}")
 
-                if extra_sout:
-                    options.append(extra_sout)
+                # Keep an active Chromecast sout across channel changes.
+                sout = extra_sout or getattr(self, "_active_cast_sout", None)
+                if sout:
+                    options.append(sout)
 
                 media = self._instance.media_new(url)
                 for opt in (option for option in options if option):
@@ -590,6 +651,7 @@ class MediaPlayer(QObject):
             except Exception as e:
                 logger.debug("add_slave error: %s", e)
         if added:
+            self._external_subtitle_path = resolved_path
             self._requested_subtitle_track = None
             self._subtitle_retry_count = 0
             try:

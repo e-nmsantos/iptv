@@ -123,6 +123,104 @@ class MediaPlayerAndCastTest(unittest.TestCase):
             self.assertFalse(player.has_renderer())
             mock_set.assert_called_with(None)
 
+    def test_set_renderer_reopens_current_stream_after_switching_output(self):
+        # libVLC ignores set_renderer() on media that is already playing.
+        player = MediaPlayer()
+        player.play("http://example.com/live.ts", {"User-Agent": "UA"}, is_live=True)
+        vlc_player = player._player
+        vlc_player.reset_mock()
+        vlc_player.set_renderer.return_value = 0
+        renderer = MagicMock()
+
+        self.assertTrue(player.set_renderer(renderer))
+
+        calls = [c[0] for c in vlc_player.method_calls if not c[0].startswith(("get_", "video_get"))]
+        self.assertEqual(calls[:2], ["stop", "set_renderer"])
+        self.assertIn("set_media", calls[2:])
+        self.assertIn("play", calls[calls.index("set_media"):])
+        self.assertEqual(player._current_url, "http://example.com/live.ts")
+
+    def test_chromecast_port_skips_ports_that_cannot_be_bound(self):
+        import socket
+
+        from src.player.media_player import pick_chromecast_http_port
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as busy:
+            busy.bind(("0.0.0.0", 0))
+            busy.listen(1)
+            taken = busy.getsockname()[1]
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("0.0.0.0", 0))
+                free = probe.getsockname()[1]
+            self.assertEqual(pick_chromecast_http_port((taken, free)), free)
+
+    def test_vlc_instance_uses_the_picked_chromecast_port(self):
+        with patch("src.player.media_player.pick_chromecast_http_port", return_value=18010), \
+                patch("src.player.media_player.vlc.Instance", return_value=MagicMock()) as make:
+            MediaPlayer()
+        self.assertIn("--sout-chromecast-http-port=18010", make.call_args[0][0])
+
+    def test_set_renderer_keeps_position_and_subtitle_of_a_movie(self):
+        player = MediaPlayer()
+        player.play("http://example.com/movie.mkv", is_live=False)
+        vlc_player = player._player
+        vlc_player.get_time.return_value = 1_800_000
+        vlc_player.video_get_spu.return_value = 3
+        vlc_player.set_renderer.return_value = 0
+        vlc_player.get_length.return_value = 7_200_000
+
+        self.assertTrue(player.set_renderer(MagicMock()))
+
+        vlc_player.video_set_spu.assert_called_with(3)
+        vlc_player.set_time.assert_called_with(1_800_000)
+
+    def test_set_renderer_failure_keeps_local_output(self):
+        player = MediaPlayer()
+        player._player.set_renderer.return_value = -1
+        self.assertFalse(player.set_renderer(MagicMock()))
+        self.assertFalse(player.has_renderer())
+
+    def test_channel_change_keeps_chromecast_sout(self):
+        player = MediaPlayer()
+        player.play("http://example.com/one.ts", is_live=True)
+        player.set_cast_target("192.168.1.80:8009")
+        media = player._instance.media_new.return_value
+        media.reset_mock()
+
+        player.play("http://example.com/two.ts", is_live=True)
+
+        options = [c.args[0] for c in media.add_option.call_args_list]
+        self.assertIn(":sout=#chromecast{ip=192.168.1.80}", options)
+
+    def test_device_names_match_exactly_not_by_substring(self):
+        from src.core.cast_manager import _same_device_name
+
+        self.assertTrue(_same_device_name("📺 TV da sala de família", "tv da sala de FAMÍLIA"))
+        self.assertFalse(_same_device_name("📺 [TV] Samsung", "TV"))
+        self.assertFalse(_same_device_name("📺 TV da sala de família", "TV"))
+
+    def test_dlna_answer_from_a_chromecast_tv_is_merged(self):
+        from src.core.cast_manager import CastDevice, CastManager
+
+        mgr = CastManager()
+        mgr._devices["vlc_sala"] = CastDevice(
+            device_id="vlc_sala", name="📺 TV da sala", device_type="chromecast",
+            location="vlc", vlc_renderer=MagicMock(),
+        )
+        xml = (
+            b'<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+            b"<friendlyName>TV da sala</friendlyName><serviceList><service>"
+            b"<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>"
+            b"<controlURL>/avt</controlURL></service></serviceList></device></root>"
+        )
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = xml
+        with patch("src.core.cast_manager.urllib.request.urlopen", return_value=response):
+            mgr._resolve_upnp_device("http://192.168.1.50:52323/MediaRenderer.xml")
+
+        self.assertEqual(len(mgr.list_devices()), 1)
+        self.assertEqual(mgr.list_devices()[0].control_url, "http://192.168.1.50:52323/avt")
+
     def test_cast_manager_vlc_renderer_casting(self):
         from src.core.cast_manager import CastDevice, CastManager
         cast_mgr = CastManager.get_instance()

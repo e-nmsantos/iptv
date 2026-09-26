@@ -661,6 +661,14 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
     @Slot()
     def _show_cast_dialog(self):
         from .cast_dialog import CastDialog
+
+        # Non-modal and single-instance: the player controls (seek, pause) must
+        # stay usable while casting, since the TV remote cannot seek VLC's stream.
+        existing = getattr(self, "_cast_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
         curr_channel = getattr(self, "_current_playback_channel", None)
         url = curr_channel.url if curr_channel else ""
         title = curr_channel.name if curr_channel else ""
@@ -682,7 +690,10 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
             media_player=self._media_player,
             parent=self,
         )
-        dialog.exec()
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.destroyed.connect(lambda: setattr(self, "_cast_dialog", None))
+        self._cast_dialog = dialog
+        dialog.show()
 
     @Slot()
     def _show_about(self):
