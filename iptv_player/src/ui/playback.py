@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QListWidgetItem, QMessageBox
 from ..core.channel import Channel
 from ..core.content_types import LIVE, SERIES, VOD, content_type_for_stream
 from ..core.diagnostics import diagnose_channel
+from .premium_mixin import stalker_episode_channel
 
 
 class PlaybackMixin:
@@ -55,7 +56,7 @@ class PlaybackMixin:
                     # object is the one held by the channel list, so the short
                     # lived create_link URL would be replayed on the next click
                     # (expired token) instead of being resolved again.
-                    self._play_channel(dc_replace(channel, url=url))
+                    self._play_channel(dc_replace(channel, url=url), replay=channel)
 
                 def on_error(err):
                     self._logger.warning(
@@ -95,23 +96,29 @@ class PlaybackMixin:
         if not self._current_playlist_id:
             return
         try:
-            for entry in self._playback_controller.resume_candidates(
+            for entry in self._playback_controller.continue_watching(
                 self._current_playlist_id
             ):
-                channel = entry["channel"]
-                percent = round(entry["fraction"] * 100)
-                row = QListWidgetItem(f"▶ {channel.name}  ·  {percent}%")
-                row.setData(Qt.ItemDataRole.UserRole, channel)
-                row.setToolTip(f"Retomar {channel.name} em {percent}%")
+                if entry["up_next"]:
+                    label = f"⏭ {entry['title']}  ·  próximo episódio"
+                else:
+                    label = f"▶ {entry['title']}  ·  {round(entry['fraction'] * 100)}%"
+                if entry.get("subtitle"):
+                    label += f"  ·  {entry['subtitle']}"
+                row = QListWidgetItem(label)
+                row.setData(Qt.ItemDataRole.UserRole, entry)
+                row.setToolTip(f"Retomar {entry['title']}")
                 self._resume_list.addItem(row)
         except Exception as exc:
             self._logger.warning(f"Failed to load resume list: {exc}")
+        if hasattr(self, "_refresh_home"):
+            self._refresh_home()
 
     def _on_resume_item_activated(self, item: QListWidgetItem):
-        """Resume playback of a VOD/series entry (position restored by _play_channel)."""
-        channel = item.data(Qt.ItemDataRole.UserRole)
-        if channel:
-            self._on_vod_selected(channel)
+        """Resume a film/episode from the "Continuar a ver" tab."""
+        entry = item.data(Qt.ItemDataRole.UserRole)
+        if entry:
+            self._resume_from_home(entry)
 
     def _hydrate_channel(self, channel):
         """Return a channel with decrypted URL/headers.
@@ -139,10 +146,26 @@ class PlaybackMixin:
         """Resolve a channel's URL for display/copy (hydrating light rows)."""
         return self._hydrate_channel(channel).url
 
-    def _play_channel(self, channel):
-        """Start playback of a channel whose URL is already resolved/final."""
+    def _play_channel(self, channel, replay=None, parent=None, auto_resume: bool = False):
+        """Start playback of a channel whose URL is already resolved/final.
+
+        ``replay`` is what to store for playing it again later (the channel
+        before a short-lived provider link was resolved); ``parent`` is the
+        series of an episode; ``auto_resume`` skips the "Retomar?" prompt.
+        """
         try:
             self._persist_playback_progress()
+            if hasattr(self, "_show_player_page"):
+                self._show_player_page()
+                self._osd.hide_card()
+            self._current_replay_channel = replay or channel
+            self._current_parent = parent
+            if (
+                channel.stream_type == "series"
+                and channel.source == "m3u"
+                and hasattr(self, "_episode_context")
+            ):
+                self._ensure_m3u_episode_context(channel)
             self._current_playback_channel = channel
             self._current_playback_playlist_id = self._current_playlist_id
             self._playback_position_ms = 0
@@ -189,6 +212,10 @@ class PlaybackMixin:
             )
             self._player_widget.set_channel_info(channel.name)
             self.statusBar().showMessage(f"A reproduzir: {channel.name}")
+            if hasattr(self, "_update_next_episode_button"):
+                self._update_next_episode_button()
+            if channel.stream_type == "live" and hasattr(self, "_show_live_banner"):
+                QTimer.singleShot(700, lambda active=channel: self._show_live_banner(active))
 
             # If casting is currently active, seamlessly update stream on the TV
             try:
@@ -211,10 +238,13 @@ class PlaybackMixin:
             playlist_id = self._current_playlist_id
             if playlist_id:
                 def record_start():
-                    return self._playback_controller.started(playlist_id, channel)
+                    return self._playback_controller.started(
+                        playlist_id, channel, replay=replay, parent=parent
+                    )
 
                 def on_started(resume):
                     QTimer.singleShot(150, self._refresh_history)
+                    QTimer.singleShot(300, self._refresh_resume)
                     if self._current_playback_channel is not channel:
                         return
                     if content_type_for_stream(channel.stream_type) not in (VOD, SERIES):
@@ -223,6 +253,9 @@ class PlaybackMixin:
                         return
                     position_ms = int(resume["position_ms"])
                     if position_ms < 30_000:
+                        return
+                    if auto_resume:
+                        self._resume_from(position_ms, channel)
                         return
                     mins = position_ms // 60000
                     secs = (position_ms % 60000) // 1000
@@ -397,6 +430,17 @@ class PlaybackMixin:
         self._playback_position_ms = self._playback_length_ms
         self._persist_playback_progress()
         self._refresh_resume()
+        if hasattr(self, "_handle_episode_end"):
+            self._handle_episode_end()
+
+    def _ensure_m3u_episode_context(self, channel) -> None:
+        """M3U "series" are plain entries; their siblings in the group are the episodes."""
+        context = self._episode_context
+        if context is not None and any(ep is channel or ep.url == channel.url for ep in context[1]):
+            return
+        series = (getattr(self, "_cached_channels_by_type", None) or {}).get(SERIES) or []
+        siblings = [item for item in series if item.group == channel.group]
+        self._episode_context = (None, siblings) if len(siblings) > 1 else None
 
     def _persist_playback_progress(self):
         playlist_id = getattr(self, "_current_playback_playlist_id", None) or self._current_playlist_id
@@ -473,7 +517,7 @@ class PlaybackMixin:
         )
 
     @Slot(object)
-    def _on_vod_selected(self, channel):
+    def _on_vod_selected(self, channel, auto_resume: bool = False):
         """Handle VOD (movie) selection. Stalker movies store an opaque
         cmd blob as `url` that must be resolved via create_link right
         before playback; other sources already have a final URL."""
@@ -491,7 +535,7 @@ class PlaybackMixin:
                 )
 
             def on_resolved(url):
-                self._play_channel(dc_replace(channel, url=url))
+                self._play_channel(dc_replace(channel, url=url), replay=channel, auto_resume=auto_resume)
 
             self._run_background(
                 resolve, on_resolved,
@@ -499,7 +543,7 @@ class PlaybackMixin:
                 context_playlist_id=playlist_id,
             )
         else:
-            self._play_channel(channel)
+            self._play_channel(channel, auto_resume=auto_resume)
 
     @Slot(object)
     def _on_series_show_opened(self, show):
@@ -507,6 +551,8 @@ class PlaybackMixin:
         self._series_browser.show_episode_browser(show.name)
         self.statusBar().showMessage(f"A obter temporadas de {show.name}...")
         playlist_id = self._current_playlist_id
+        self._series_browser_show = show
+        self._series_browser_episodes = []
 
         if show.source == "stalker":
             def fetch():
@@ -519,12 +565,16 @@ class PlaybackMixin:
 
             def on_seasons(raw_seasons):
                 seasons = []
+                ordered = []
                 for season in raw_seasons:
                     episodes = []
                     for ep_num in season.get("series") or []:
+                        ep_channel = stalker_episode_channel(show, season, ep_num)
+                        ordered.append(ep_channel)
                         episodes.append({
                             "label": f"Episódio {ep_num}",
                             "payload": {
+                                "channel": ep_channel,
                                 "source": "stalker",
                                 "cmd": season.get("cmd", ""),
                                 "episode": ep_num,
@@ -535,6 +585,7 @@ class PlaybackMixin:
                             },
                         })
                     seasons.append({"name": season.get("name", "Temporada"), "episodes": episodes})
+                self._series_browser_episodes = ordered
                 self._series_browser.set_seasons(seasons)
                 self.statusBar().showMessage(f"{show.name}: {len(seasons)} temporada(s)")
 
@@ -554,6 +605,9 @@ class PlaybackMixin:
                 for ep in episode_channels:
                     by_season.setdefault(ep.season_number, []).append(ep)
                 seasons = []
+                self._series_browser_episodes = [
+                    ep for season_num in sorted(by_season.keys()) for ep in by_season[season_num]
+                ]
                 for season_num in sorted(by_season.keys()):
                     episodes = [
                         {
@@ -574,11 +628,17 @@ class PlaybackMixin:
         else:
             # M3U playlists normally expose each episode as a directly playable
             # entry rather than a top-level show with a provider API.
-            self._play_channel(show)
+            self._play_channel(show, replay=show)
 
     @Slot(object)
     def _on_series_episode_selected(self, payload):
         """User selected a specific episode in the season/episode browser."""
+        episode = payload.get("channel")
+        show = getattr(self, "_series_browser_show", None)
+        if episode is not None and hasattr(self, "_play_episode"):
+            self._episode_context = (show, list(self._series_browser_episodes))
+            self._play_episode(episode, show if show and show.source in ("xtream", "stalker") else None)
+            return
         source = payload.get("source")
 
         if source == "stalker":

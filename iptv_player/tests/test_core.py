@@ -735,7 +735,7 @@ class DatabaseTests(unittest.TestCase):
                     "UPDATE channels SET name = 'Cinema Europeu' WHERE playlist_id = ?",
                     (playlist_id,),
                 )
-            self.assertEqual(version, "6")
+            self.assertEqual(version, "7")
             self.assertEqual(
                 [channel.name for channel in db.search_channels(playlist_id, "cinema")],
                 ["Cinema Europeu"],

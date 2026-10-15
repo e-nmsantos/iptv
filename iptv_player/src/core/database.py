@@ -1213,6 +1213,234 @@ class DatabaseManager:
         results.sort(key=lambda item: item["updated_at"], reverse=True)
         return results
 
+    # ------------------------------------------------------------------
+    # Watch history: "Continuar a ver", próximo episódio, canais recentes
+    # ------------------------------------------------------------------
+    WATCH_HISTORY_LIMIT = 200
+
+    def _encode_channel(self, channel: Optional[Channel]) -> str:
+        if channel is None:
+            return ""
+        return self._secrets.encrypt(json.dumps(channel.to_dict(), ensure_ascii=False))
+
+    def _decode_channel(self, value: str) -> Optional[Channel]:
+        if not value:
+            return None
+        try:
+            data = json.loads(self._secrets.decrypt(value))
+            channel = Channel.from_dict(data) if isinstance(data, dict) else None
+        except (TypeError, ValueError):
+            return None
+        if channel is None or not channel.name:
+            return None
+        return channel
+
+    def media_key(self, channel: Channel) -> str:
+        """Stable identity shared by playback progress and watch history."""
+        return self._playback_key(channel)
+
+    def record_watch(
+        self,
+        playlist_id: int,
+        channel: Channel,
+        parent: Optional[Channel] = None,
+        up_next: bool = False,
+    ) -> None:
+        """Remember a replayable channel as just watched (or queued as next episode).
+
+        ``parent`` is the series show of an episode, so the next episode can
+        still be found when the episode is resumed from Início.
+        """
+        artwork = channel.logo or channel.tvg_logo or (parent.logo if parent else "")
+        subtitle = parent.name if parent else (channel.group or "")
+        with self._connection() as conn:
+            conn.execute(
+                """INSERT INTO watch_history
+                   (playlist_id, media_key, stream_type, title, subtitle, artwork,
+                    channel_data, parent_data, up_next, played_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(playlist_id, media_key) DO UPDATE SET
+                       stream_type = excluded.stream_type,
+                       title = excluded.title,
+                       subtitle = excluded.subtitle,
+                       artwork = excluded.artwork,
+                       channel_data = excluded.channel_data,
+                       parent_data = excluded.parent_data,
+                       up_next = excluded.up_next,
+                       played_at = excluded.played_at""",
+                (
+                    playlist_id,
+                    self._playback_key(channel),
+                    channel.stream_type,
+                    channel.name,
+                    subtitle,
+                    artwork,
+                    self._encode_channel(channel),
+                    self._encode_channel(parent),
+                    1 if up_next else 0,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.execute(
+                """DELETE FROM watch_history
+                   WHERE playlist_id = ? AND media_key NOT IN (
+                       SELECT media_key FROM watch_history WHERE playlist_id = ?
+                       ORDER BY played_at DESC LIMIT ?
+                   )""",
+                (playlist_id, playlist_id, self.WATCH_HISTORY_LIMIT),
+            )
+
+    def get_continue_watching(self, playlist_id: int, limit: int = 20) -> list[dict]:
+        """In-progress films/episodes plus queued next episodes, newest first."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """SELECT h.media_key, h.title, h.subtitle, h.artwork, h.channel_data,
+                          h.parent_data, h.up_next, h.played_at,
+                          p.position_ms, p.length_ms
+                   FROM watch_history h
+                   LEFT JOIN playback_progress p
+                     ON p.playlist_id = h.playlist_id AND p.media_key = h.media_key
+                   WHERE h.playlist_id = ? AND h.stream_type != 'live'
+                     AND (p.media_key IS NOT NULL OR h.up_next = 1)
+                   ORDER BY h.played_at DESC LIMIT ?""",
+                (playlist_id, max(1, int(limit))),
+            ).fetchall()
+        items = []
+        for row in rows:
+            channel = self._decode_channel(row["channel_data"])
+            if channel is None:
+                continue
+            position = int(row["position_ms"] or 0)
+            length = int(row["length_ms"] or 0)
+            items.append({
+                "media_key": row["media_key"],
+                "channel": channel,
+                "parent": self._decode_channel(row["parent_data"]),
+                "title": row["title"],
+                "subtitle": row["subtitle"],
+                "artwork": row["artwork"],
+                "up_next": bool(row["up_next"]),
+                "played_at": row["played_at"],
+                "position_ms": position,
+                "length_ms": length,
+                "fraction": (position / length) if length > 0 else 0.0,
+            })
+        return items
+
+    def get_recent_live(self, playlist_id: int, limit: int = 15) -> list[Channel]:
+        """Recently watched live channels, newest first."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """SELECT channel_data FROM watch_history
+                   WHERE playlist_id = ? AND stream_type = 'live'
+                   ORDER BY played_at DESC LIMIT ?""",
+                (playlist_id, max(1, int(limit))),
+            ).fetchall()
+        return [
+            channel
+            for channel in (self._decode_channel(row["channel_data"]) for row in rows)
+            if channel is not None
+        ]
+
+    def remove_watch(self, playlist_id: int, media_key: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM watch_history WHERE playlist_id = ? AND media_key = ?",
+                (playlist_id, media_key),
+            )
+
+    def get_recently_added(
+        self, playlist_id: int, content_type: str, limit: int = 20
+    ) -> list[Channel]:
+        """Newest catalogue rows first; the differential importer only appends."""
+        stream_types = self._catalog_stream_types(content_type)
+        placeholders = ",".join("?" for _ in stream_types)
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM channels
+                    WHERE playlist_id = ? AND stream_type IN ({placeholders})
+                    ORDER BY id DESC LIMIT ?""",
+                (playlist_id, *stream_types, max(1, int(limit))),
+            ).fetchall()
+        return [self._row_to_channel(row, decrypt_urls=False) for row in rows]
+
+    # ------------------------------------------------------------------
+    # EPG reminders and scheduled recordings
+    # ------------------------------------------------------------------
+    @staticmethod
+    def reminder_channel_key(channel: Channel) -> str:
+        return channel.epg_channel_id or channel.tvg_id or channel.xtream_id or channel.name
+
+    def save_reminder(
+        self,
+        playlist_id: int,
+        channel: Channel,
+        title: str,
+        start: datetime,
+        stop: datetime,
+        action: str = "remind",
+    ) -> None:
+        if action not in ("remind", "record"):
+            raise ValueError(f"Ação de lembrete inválida: {action}")
+        with self._connection() as conn:
+            conn.execute(
+                """INSERT INTO epg_reminders
+                   (playlist_id, channel_key, start_time, stop_time, title, action, channel_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(playlist_id, channel_key, start_time) DO UPDATE SET
+                       stop_time = excluded.stop_time,
+                       title = excluded.title,
+                       action = excluded.action,
+                       channel_data = excluded.channel_data""",
+                (
+                    playlist_id,
+                    self.reminder_channel_key(channel),
+                    start.astimezone(timezone.utc).isoformat(),
+                    stop.astimezone(timezone.utc).isoformat(),
+                    title,
+                    action,
+                    self._encode_channel(channel),
+                ),
+            )
+
+    def delete_reminder(self, playlist_id: int, channel_key: str, start: datetime) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """DELETE FROM epg_reminders
+                   WHERE playlist_id = ? AND channel_key = ? AND start_time = ?""",
+                (playlist_id, channel_key, start.astimezone(timezone.utc).isoformat()),
+            )
+
+    def get_reminders(self, playlist_id: Optional[int] = None) -> list[dict]:
+        """Unfinished reminders, soonest first; finished ones are purged."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as conn:
+            conn.execute("DELETE FROM epg_reminders WHERE stop_time < ?", (now,))
+            if playlist_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM epg_reminders ORDER BY start_time"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM epg_reminders WHERE playlist_id = ? ORDER BY start_time",
+                    (playlist_id,),
+                ).fetchall()
+        reminders = []
+        for row in rows:
+            channel = self._decode_channel(row["channel_data"])
+            if channel is None:
+                continue
+            reminders.append({
+                "playlist_id": row["playlist_id"],
+                "channel_key": row["channel_key"],
+                "channel": channel,
+                "title": row["title"],
+                "action": row["action"],
+                "start": datetime.fromisoformat(row["start_time"]),
+                "stop": datetime.fromisoformat(row["stop_time"]),
+            })
+        return reminders
+
     def cache_epg(self, programs: list):
         """Cache EPG programs in the database."""
         with self._connection() as conn:

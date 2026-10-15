@@ -1,5 +1,6 @@
 """Video player widget with playback controls."""
 
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -72,6 +73,8 @@ class PlayerWidget(QWidget):
     retry_requested = Signal()
     skip_backward_requested = Signal()
     skip_forward_requested = Signal()
+    go_live_requested = Signal()
+    next_episode_requested = Signal()
 
     def __init__(self, media_player: MediaPlayer, settings=None, parent=None):
         super().__init__(parent)
@@ -83,6 +86,13 @@ class PlayerWidget(QWidget):
         self._pip_window: Optional[PiPWindow] = None
         self._last_seek_value = -1
         self._countdown_remaining = 0
+        # Live pause: VLC keeps recording the broadcast to its timeshift files,
+        # so the picture lags "now" by however long it has been paused.
+        self._live_paused_at: Optional[float] = None
+        self._behind_live_ms = 0
+        self._live_label_timer = QTimer(self)
+        self._live_label_timer.setInterval(1000)
+        self._live_label_timer.timeout.connect(self._update_live_label)
         self._error_countdown_timer = QTimer(self)
         self._error_countdown_timer.setInterval(1000)
         self._error_countdown_timer.timeout.connect(self._on_error_countdown_tick)
@@ -151,6 +161,21 @@ class PlayerWidget(QWidget):
         self._skip_forward_btn.clicked.connect(self._skip_forward)
         self._skip_forward_btn.hide()
         btn_layout.addWidget(self._skip_forward_btn)
+
+        self._go_live_btn = QPushButton("⏭ Ir para o direto")
+        self._go_live_btn.setObjectName("pillButton")
+        self._go_live_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._go_live_btn.setToolTip("Sair da pausa em direto e voltar ao momento atual")
+        self._go_live_btn.clicked.connect(self._on_go_live_clicked)
+        self._go_live_btn.hide()
+        btn_layout.addWidget(self._go_live_btn)
+
+        self._next_episode_btn = QPushButton("⏭ Próximo episódio")
+        self._next_episode_btn.setObjectName("pillButton")
+        self._next_episode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._next_episode_btn.clicked.connect(self.next_episode_requested.emit)
+        self._next_episode_btn.hide()
+        btn_layout.addWidget(self._next_episode_btn)
 
         btn_layout.addSpacing(15)
 
@@ -332,11 +357,69 @@ class PlayerWidget(QWidget):
 
     @Slot()
     def _toggle_play(self):
-        """Toggle play/pause."""
+        """Toggle play/pause; on live channels this pauses the broadcast (timeshift)."""
+        self.toggle_play()
+
+    def toggle_play(self) -> None:
         if self._media_player.is_playing:
             self._media_player.pause()
+            if self._stream_type == "live" and self._live_paused_at is None:
+                self._live_paused_at = time.monotonic()
         else:
+            if self._stream_type == "live" and self._live_paused_at is not None:
+                timeshift = bool(self._settings.get("timeshift_enabled", True)) if self._settings else True
+                if not timeshift:
+                    self.reset_live_offset()
+                    self.go_live_requested.emit()
+                    return
+                self._behind_live_ms += int((time.monotonic() - self._live_paused_at) * 1000)
+                self._live_paused_at = None
             self._media_player.play()
+        self._update_live_label()
+
+    @property
+    def behind_live_ms(self) -> int:
+        """How far the live picture lags the broadcast (0 when at "now")."""
+        paused_for = 0
+        if self._live_paused_at is not None:
+            paused_for = int((time.monotonic() - self._live_paused_at) * 1000)
+        return self._behind_live_ms + paused_for
+
+    def reset_live_offset(self) -> None:
+        self._live_paused_at = None
+        self._behind_live_ms = 0
+        self._update_live_label()
+
+    def _on_go_live_clicked(self) -> None:
+        self.reset_live_offset()
+        self.go_live_requested.emit()
+
+    def _update_live_label(self) -> None:
+        if self._stream_type != "live":
+            self._go_live_btn.hide()
+            self._live_label_timer.stop()
+            return
+        behind = self.behind_live_ms
+        if behind > 1000:
+            self._time_label.setText(f"⏸ EM DIFERIDO −{format_duration(behind // 1000)}")
+            self._time_label.setStyleSheet(
+                f"color: {Palette.WARNING_AMBER}; font-size: 12px; font-weight: 700;"
+            )
+            self._go_live_btn.show()
+            if not self._live_label_timer.isActive():
+                self._live_label_timer.start()
+        else:
+            self._time_label.setText("● DIRETO")
+            self._time_label.setStyleSheet(
+                f"color: {Palette.LIVE_BADGE}; font-size: 12px; font-weight: 700;"
+            )
+            self._go_live_btn.hide()
+            self._live_label_timer.stop()
+
+    def set_next_episode(self, title: Optional[str]) -> None:
+        """Show the "Próximo episódio" button when an episode follows the current one."""
+        self._next_episode_btn.setVisible(bool(title))
+        self._next_episode_btn.setToolTip(f"A seguir: {title}" if title else "")
 
     @Slot()
     def _stop(self):
@@ -365,8 +448,15 @@ class PlayerWidget(QWidget):
         self._skip_back_btn.setVisible(not is_live)
         self._skip_forward_btn.setVisible(not is_live)
         self._progress_slider.setVisible(not is_live)
+        self._live_paused_at = None
+        self._behind_live_ms = 0
         if is_live:
-            self._time_label.setText("AO VIVO")
+            self.set_next_episode(None)
+            self._update_live_label()
+        else:
+            self._go_live_btn.hide()
+            self._live_label_timer.stop()
+            self._time_label.setStyleSheet(f"color: {Palette.TEXT_SECONDARY}; font-size: 12px;")
 
     def show_error_banner(self, message: str, is_live: bool = True):
         """Show the error banner with automatic countdown for live channels."""
@@ -498,6 +588,8 @@ class PlayerWidget(QWidget):
     @Slot(int)
     def _on_time_changed(self, time_ms: int):
         """Update time labels."""
+        if self._stream_type == "live":
+            return
         length = self._media_player.get_length()
         current = format_duration(time_ms // 1000)
         total = format_duration(length // 1000) if length > 0 else "00:00"
@@ -574,10 +666,16 @@ class PlayerWidget(QWidget):
         if not self._overlay_action.isChecked():
             return
         bitrate = stats.get("bitrate_kbps", 0)
-        dropped = stats.get("dropped_frames", 0)
-        buffering = stats.get("buffering_events", 0)
-        text = f"{bitrate:.0f} kbps · {dropped} quebras · buffer x{buffering}"
-        self._media_player.set_marquee_text(text)
+        parts = [
+            stats.get("resolution", ""),
+            f"{stats['fps']:.0f} fps" if stats.get("fps") else "",
+            stats.get("video_codec", ""),
+            stats.get("audio_codec", ""),
+            f"{bitrate / 1000:.1f} Mbps" if bitrate >= 1000 else (f"{bitrate:.0f} kbps" if bitrate else ""),
+            f"{stats.get('dropped_frames', 0)} frames perdidos",
+            f"buffer x{stats.get('buffering_events', 0)}",
+        ]
+        self._media_player.set_marquee_text("  ·  ".join(part for part in parts if part))
 
     @Slot(bool)
     def _toggle_pip(self, checked: bool):

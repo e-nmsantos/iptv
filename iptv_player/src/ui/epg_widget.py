@@ -101,6 +101,10 @@ class EPGWidget(QWidget):
             display = channel_name or channel_id
             self._channel_combo.addItem(display, channel_id)
 
+    def programs_for(self, channel_id: str) -> list:
+        """Programmes already loaded for ``channel_id`` (empty when unknown)."""
+        return list(self._programs.get(channel_id) or [])
+
     def select_channel(self, channel_id: str):
         """Select a channel in the EPG picker when it is available."""
         index = self._channel_combo.findData(channel_id)

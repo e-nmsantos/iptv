@@ -45,6 +45,10 @@ class Settings:
         "autoplay_last_channel": True,
         "clean_channel_names": True,
         "sleep_timer_minutes": 0,
+        # Premium playback.
+        "timeshift_enabled": True,
+        "autoplay_next_episode": True,
+        "show_home_on_start": True,
         # Session restore.
         "last_playlist_id": None,
         "last_content_tab": 0,

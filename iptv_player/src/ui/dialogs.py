@@ -440,6 +440,20 @@ class SettingsDialog(QDialog):
         self._auto_next.setChecked(self._settings.get("auto_next_enabled", True))
         player_layout.addRow(self._auto_next)
 
+        self._timeshift = QCheckBox(
+            "Pausa em direto: continuar a receber o canal enquanto está em pausa (usa espaço temporário em disco)"
+        )
+        self._timeshift.setChecked(self._settings.get("timeshift_enabled", True))
+        player_layout.addRow(self._timeshift)
+
+        self._autoplay_next_episode = QCheckBox("Reproduzir o próximo episódio automaticamente (após 10 s)")
+        self._autoplay_next_episode.setChecked(self._settings.get("autoplay_next_episode", True))
+        player_layout.addRow(self._autoplay_next_episode)
+
+        self._show_home = QCheckBox("Abrir no Início (continuar a ver, recentes e novidades)")
+        self._show_home.setChecked(self._settings.get("show_home_on_start", True))
+        player_layout.addRow(self._show_home)
+
         tabs.addTab(player_tab, "Player")
 
         # Network tab
@@ -553,6 +567,9 @@ class SettingsDialog(QDialog):
                 "recording_folder": self._recording_folder.text(),
                 "stream_overlay_enabled": self._stream_overlay.isChecked(),
                 "auto_next_enabled": self._auto_next.isChecked(),
+                "timeshift_enabled": self._timeshift.isChecked(),
+                "autoplay_next_episode": self._autoplay_next_episode.isChecked(),
+                "show_home_on_start": self._show_home.isChecked(),
                 "update_manifest_url": self._update_url.text().strip(),
                 "parental_lock_enabled": self._parental_enabled.isChecked(),
             }

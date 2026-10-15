@@ -13,13 +13,39 @@ class PlaybackController:
         self._sleep_timer: Optional[threading.Timer] = None
         self._sleep_timer_end: float = 0.0
 
-    def started(self, playlist_id: int, channel):
-        if self._current_channel and channel and self._current_channel != channel:
+    def started(self, playlist_id: int, channel, replay=None, parent=None):
+        """Record a playback start and return its saved resume point, if any.
+
+        ``replay`` is the reference to store for playing it again later (e.g.
+        a Stalker channel before its short-lived link was resolved); it
+        defaults to ``channel``. ``parent`` is the series of an episode.
+        """
+        # Track the replayable reference so "canal anterior" re-resolves
+        # short-lived provider links instead of replaying an expired one.
+        reference = replay or channel
+        if self._current_channel and reference and self._current_channel != reference:
             self._previous_channel = self._current_channel
-        self._current_channel = channel
+        self._current_channel = reference
 
         self._database.record_playback(playlist_id, channel)
+        self._database.record_watch(playlist_id, replay or channel, parent=parent)
         return self._database.get_playback_progress(playlist_id, channel)
+
+    def queue_next_episode(self, playlist_id: int, episode, parent=None) -> None:
+        """Show an unwatched next episode in "Continuar a ver"."""
+        self._database.record_watch(playlist_id, episode, parent=parent, up_next=True)
+
+    def continue_watching(self, playlist_id: int) -> list[dict]:
+        return self._database.get_continue_watching(playlist_id)
+
+    def recent_live(self, playlist_id: int) -> list:
+        return self._database.get_recent_live(playlist_id)
+
+    def recently_added(self, playlist_id: int, content_type: str, limit: int = 20) -> list:
+        return self._database.get_recently_added(playlist_id, content_type, limit)
+
+    def remove_from_continue(self, playlist_id: int, media_key: str) -> None:
+        self._database.remove_watch(playlist_id, media_key)
 
     @property
     def current_channel(self):

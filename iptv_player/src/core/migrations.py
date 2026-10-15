@@ -4,7 +4,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 BASELINE_SCHEMA_VERSION = 4
 
 
@@ -47,9 +47,51 @@ def _migration_6_catalog_hashes(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_7_watch_history_and_reminders(conn: sqlite3.Connection) -> None:
+    """Replayable watch history (Início, próximo episódio) and EPG reminders.
+
+    ``playback_progress`` only stores a hashed identity, which cannot be turned
+    back into something playable — episodes in particular never live in the
+    ``channels`` table. Both tables keep an encrypted copy of the replayable
+    channel instead.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS watch_history (
+            playlist_id INTEGER NOT NULL,
+            media_key TEXT NOT NULL,
+            stream_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            subtitle TEXT NOT NULL DEFAULT '',
+            artwork TEXT NOT NULL DEFAULT '',
+            channel_data TEXT NOT NULL,
+            parent_data TEXT NOT NULL DEFAULT '',
+            up_next INTEGER NOT NULL DEFAULT 0,
+            played_at TEXT NOT NULL,
+            PRIMARY KEY (playlist_id, media_key),
+            FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_watch_history_recent
+            ON watch_history(playlist_id, played_at);
+        CREATE TABLE IF NOT EXISTS epg_reminders (
+            playlist_id INTEGER NOT NULL,
+            channel_key TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            stop_time TEXT NOT NULL,
+            title TEXT NOT NULL,
+            action TEXT NOT NULL DEFAULT 'remind',
+            channel_data TEXT NOT NULL,
+            PRIMARY KEY (playlist_id, channel_key, start_time),
+            FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _migration_5_catalog_fts,
     6: _migration_6_catalog_hashes,
+    7: _migration_7_watch_history_and_reminders,
 }
 
 

@@ -7,12 +7,20 @@ cached for exactly those channels, reusing whatever per-channel fetch path
 already exists (Xtream/Stalker lazy fetch, or the XMLTV cache).
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..core.channel import Channel
 from ..core.epg import EPGProgram
@@ -32,7 +40,13 @@ class _EPGCanvas(QWidget):
         self._channels: list[Channel] = []
         self._programs_by_channel: dict[str, list[EPGProgram]] = {}
         self._window_start: datetime = datetime.now().astimezone()
+        # (channel key, UTC ISO start) -> "remind" | "record"
+        self._scheduled: dict = {}
         self.setMouseTracking(True)
+
+    def set_scheduled(self, scheduled: dict) -> None:
+        self._scheduled = dict(scheduled)
+        self.update()
 
     def set_data(self, channels: list[Channel], programs_by_channel: dict, window_start: datetime):
         self._channels = channels
@@ -96,12 +110,23 @@ class _EPGCanvas(QWidget):
                 is_past = program.stop <= now
                 color = Palette.ACCENT if is_live else (Palette.BG_CARD_HOVER if is_past else Palette.BG_CARD)
                 painter.fillRect(block_rect, QColor(color))
-                painter.setPen(QPen(QColor(Palette.BORDER_STRONG)))
+                scheduled = self._scheduled.get(
+                    (self._channel_epg_key(channel), program.start.astimezone(timezone.utc).isoformat())
+                )
+                border = Palette.BORDER_STRONG
+                if scheduled == "record":
+                    border = Palette.LIVE_BADGE
+                elif scheduled == "remind":
+                    border = Palette.WARNING_AMBER
+                pen = QPen(QColor(border))
+                pen.setWidth(2 if scheduled else 1)
+                painter.setPen(pen)
                 painter.drawRect(block_rect)
                 painter.setPen(QColor(Palette.TEXT_ON_ACCENT if is_live else Palette.TEXT_PRIMARY))
                 title_rect = block_rect.adjusted(4, 0, -4, 0)
+                prefix = {"record": "⏺ ", "remind": "🔔 "}.get(scheduled, "")
                 elided_title = metrics.elidedText(
-                    program.title, Qt.TextElideMode.ElideRight, int(title_rect.width())
+                    prefix + program.title, Qt.TextElideMode.ElideRight, int(title_rect.width())
                 )
                 painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, elided_title)
 
@@ -134,6 +159,8 @@ class EPGGridWidget(QWidget):
 
     channels_needed = Signal(list)  # list[Channel]
     replay_requested = Signal(object, object)  # Channel, EPGProgram
+    play_requested = Signal(object)  # Channel — a programme that is on air now
+    schedule_requested = Signal(object, object, str)  # Channel, EPGProgram, remind|record|cancel
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -179,6 +206,10 @@ class EPGGridWidget(QWidget):
         """Inject a `(channel) -> list[EPGProgram]` lookup (host owns the cache)."""
         self._programs_provider = provider
 
+    def set_scheduled(self, scheduled: dict) -> None:
+        """Mark reminders/recordings: ``{(channel key, UTC ISO start): action}``."""
+        self._canvas.set_scheduled(scheduled)
+
     def set_channels(self, channels: list[Channel]):
         self._channels = list(channels)
         self.channels_needed.emit(self._channels)
@@ -218,3 +249,26 @@ class EPGGridWidget(QWidget):
         )
         if is_replayable:
             self.replay_requested.emit(channel, program)
+            return
+        if program.start <= now < program.stop:
+            self.play_requested.emit(channel)
+            return
+        if program.start <= now:
+            return
+        key = (self._canvas._channel_epg_key(channel), program.start.astimezone(timezone.utc).isoformat())
+        scheduled = self._canvas._scheduled.get(key)
+        menu = QMenu(self)
+        start = program.start.astimezone().strftime("%H:%M")
+        header = menu.addAction(f"{program.title} · {start}")
+        header.setEnabled(False)
+        menu.addSeparator()
+        if scheduled != "remind":
+            menu.addAction("🔔 Lembrar-me quando começar",
+                           lambda: self.schedule_requested.emit(channel, program, "remind"))
+        if scheduled != "record":
+            menu.addAction("⏺ Gravar este programa",
+                           lambda: self.schedule_requested.emit(channel, program, "record"))
+        if scheduled:
+            menu.addAction("✕ Cancelar " + ("gravação" if scheduled == "record" else "lembrete"),
+                           lambda: self.schedule_requested.emit(channel, program, "cancel"))
+        menu.exec(QCursor.pos())

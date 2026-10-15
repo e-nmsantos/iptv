@@ -44,12 +44,14 @@ from .dialogs import SettingsDialog
 from .epg_grid_widget import EPGGridWidget
 from .epg_widget import EPGWidget
 from .global_search import GlobalSearchDialog
+from .home_view import HomeView
 from .import_flow_mixin import ImportFlowMixin
 from .pill_tabs import PillTabBar
 from .playback import PlaybackMixin
 from .player_widget import PlayerWidget
 from .playlist_ops_mixin import PlaylistOpsMixin
 from .playlist_widget import PlaylistWidget
+from .premium_mixin import PremiumMixin
 from .series_browser import SeriesBrowserWidget
 from .session_state import SessionStateMixin
 from .theme import Palette
@@ -58,7 +60,17 @@ from .tools_mixin import ToolsMixin
 from .updates_mixin import UpdatesMixin
 
 
-class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, ToolsMixin, PlaybackMixin, SessionStateMixin, QMainWindow):
+class MainWindow(
+    CatalogMixin,
+    ImportFlowMixin,
+    PlaylistOpsMixin,
+    UpdatesMixin,
+    ToolsMixin,
+    PlaybackMixin,
+    PremiumMixin,
+    SessionStateMixin,
+    QMainWindow,
+):
     """Main application window orchestrating all components."""
 
     def __init__(self):
@@ -140,6 +152,7 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
         self._setup_status_bar()
         self._setup_shortcuts()
         self._connect_signals()
+        self._setup_premium()
         self._load_playlists()
         if not self._settings.get("first_run_done", False):
             QTimer.singleShot(0, self._show_first_run_welcome)
@@ -479,7 +492,16 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
 
         right_layout.addWidget(self._bottom_tabs, 1)
 
-        splitter.addWidget(right_panel)
+        # Início and the player share the right-hand side: Início until
+        # something is played, and again whenever the user asks for it.
+        self._player_page = right_panel
+        self._home_view = HomeView()
+        self._right_stack = QStackedWidget()
+        self._right_stack.addWidget(self._home_view)
+        self._right_stack.addWidget(self._player_page)
+        self._right_stack.setCurrentWidget(self._player_page)
+
+        splitter.addWidget(self._right_stack)
         splitter.setSizes([350, 850])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -589,10 +611,8 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
 
     @Slot()
     def _toggle_playback(self):
-        if self._media_player.is_playing:
-            self._media_player.pause()
-        else:
-            self._media_player.play()
+        # Routed through the player widget so live pause (timeshift) is tracked.
+        self._player_widget.toggle_play()
 
     def _rename_current_playlist(self):
         """Open the rename prompt for the selected item in the sidebar."""
@@ -700,7 +720,12 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
             "Ctrl+G — Guia EPG<br>"
             "F5 — Atualizar EPG<br>"
             "+ / - — Volume&nbsp;&nbsp;·&nbsp;&nbsp;M — Mudo<br>"
-            "PageUp / PageDown — canal anterior / seguinte</p>",
+            "PageUp / PageDown — canal anterior / seguinte<br>"
+            "0–9 — ir para o canal com esse número<br>"
+            "R ou Backspace — voltar ao canal anterior<br>"
+            "I — programa atual e seguinte<br>"
+            "Ctrl+Espaço — pausar o direto (timeshift)<br>"
+            "Ctrl+H — Início</p>",
         )
 
     @Slot(bool)
@@ -713,6 +738,7 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
 
     def _enter_fullscreen(self):
         """Hide all app chrome so only the video (with its overlay controls) is visible."""
+        self._show_player_page()
         self._is_fullscreen = True
         self.menuBar().hide()
         self._toolbar.hide()
@@ -971,6 +997,8 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
 
         self._save_session_state()
         self._discard_provider_sessions()
+        self._osd.hide_all()
+        self._pvr.stop_all()
         self._player_widget.close_pip()
         self._media_player.cleanup()
         event.accept()

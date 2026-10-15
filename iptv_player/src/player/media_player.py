@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,30 @@ _STABLE_RESET_TICKS = 30             # ~15s of stable playback -> restore retry 
 _SEEK_TOLERANCE_MS = 2500
 _MAX_SEEK_RETRIES = 6
 _MAX_SUBTITLE_RETRIES = 6
+# VLC splits a paused live stream into temporary files of this size while it
+# keeps receiving the broadcast (live pause / timeshift).
+_TIMESHIFT_GRANULARITY_BYTES = 64 * 1024 * 1024
+
+_VLC_CODEC_NAMES = {
+    "h264": "H.264", "avc1": "H.264", "hevc": "HEVC", "h265": "HEVC", "mpgv": "MPEG-2",
+    "mp4v": "MPEG-4", "av01": "AV1", "vp90": "VP9",
+    "mp4a": "AAC", "a52 ": "AC-3", "eac3": "E-AC-3", "dts ": "DTS", "mpga": "MPEG Áudio",
+    "mp3 ": "MP3", "opus": "Opus", "trhd": "TrueHD",
+}
+
+
+def _fourcc_label(codec: int) -> str:
+    """Human label for a libvlc fourcc integer (e.g. 0x34363268 -> "H.264")."""
+    try:
+        raw = int(codec).to_bytes(4, "little").decode("ascii", errors="ignore").lower()
+    except (OverflowError, ValueError):
+        return ""
+    return _VLC_CODEC_NAMES.get(raw, raw.strip().upper())
+
+
+def timeshift_directory() -> Path:
+    """Scratch folder VLC uses for paused live streams; emptied on start-up."""
+    return Path(tempfile.gettempdir()) / "IPTVPlayer-timeshift"
 
 
 class MediaPlayer(QObject):
@@ -132,6 +157,18 @@ class MediaPlayer(QObject):
             "--clock-synchro=0",
             "--cr-average=1000",
         ]
+        timeshift_dir = timeshift_directory()
+        try:
+            timeshift_dir.mkdir(parents=True, exist_ok=True)
+            for leftover in timeshift_dir.glob("*"):
+                if leftover.is_file():
+                    leftover.unlink(missing_ok=True)
+            vlc_args.extend([
+                f"--input-timeshift-path={timeshift_dir}",
+                f"--input-timeshift-granularity={_TIMESHIFT_GRANULARITY_BYTES}",
+            ])
+        except OSError as exc:
+            logger.debug("Timeshift folder unavailable: %s", exc)
         if getattr(self, "_normalize_audio", True):
             vlc_args.extend(["--audio-filter=normvol", "--norm-max-level=2.0"])
 
@@ -741,11 +778,38 @@ class MediaPlayer(QObject):
         stats = vlc.MediaStats()
         if not media.get_stats(stats):
             return
-        self.stats_changed.emit({
-            "bitrate_kbps": round((stats.demux_bitrate or 0.0) * 8, 0),
+        snapshot = {
+            "bitrate_kbps": round((stats.demux_bitrate or 0.0) * 8 * 1000, 0),
             "dropped_frames": int(stats.lost_pictures or 0),
             "buffering_events": self._buffering_events,
-        })
+        }
+        snapshot.update(self._track_summary(media))
+        self.stats_changed.emit(snapshot)
+
+    def _track_summary(self, media) -> dict:
+        """Resolution and codec names of the playing media, when VLC knows them."""
+        summary = {"resolution": "", "video_codec": "", "audio_codec": "", "fps": 0.0}
+        try:
+            width, height = self._player.video_get_size(0)
+            if width and height:
+                summary["resolution"] = f"{width}×{height}"
+            fps = self._player.get_fps()
+            if fps and fps > 0:
+                summary["fps"] = round(float(fps), 2)
+            for track in media.tracks_get() or []:
+                if track.type == vlc.TrackType.video and not summary["video_codec"]:
+                    summary["video_codec"] = _fourcc_label(track.codec)
+                elif track.type == vlc.TrackType.audio and not summary["audio_codec"]:
+                    channels = getattr(getattr(track, "audio", None), "contents", None)
+                    layout = ""
+                    if channels is not None and getattr(channels, "channels", 0):
+                        layout = {1: " mono", 2: " estéreo", 6: " 5.1", 8: " 7.1"}.get(
+                            channels.channels, f" {channels.channels}ch"
+                        )
+                    summary["audio_codec"] = _fourcc_label(track.codec) + layout
+        except Exception as exc:  # libvlc bindings differ between versions
+            logger.debug("Track summary unavailable: %s", exc)
+        return summary
 
     def _update_live_stall_detection(self) -> bool:
         """Detect a live picture frozen while VLC still reports 'Playing'.
