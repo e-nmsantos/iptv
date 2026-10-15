@@ -58,6 +58,7 @@ internal fun PlayerControlBar(
     isPlaying: Boolean,
     isFavorite: Boolean,
     speedLabel: String,
+    hasNextEpisode: Boolean,
     onSeekBackward: () -> Unit,
     onPlayPause: () -> Unit,
     onSeekForward: () -> Unit,
@@ -65,6 +66,7 @@ internal fun PlayerControlBar(
     onAudio: () -> Unit,
     onSpeed: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onNextEpisode: () -> Unit,
     onInteract: () -> Unit,
 ) {
     val firstRequester = remember { FocusRequester() }
@@ -76,12 +78,50 @@ internal fun PlayerControlBar(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        ControlBarButton("⏪ 10s", Modifier.focusRequester(firstRequester)) { onInteract(); onSeekBackward() }
-        ControlBarButton(if (isPlaying) "⏸ Pausa" else "▶ Reproduzir") { onInteract(); onPlayPause() }
+        ControlBarButton("⏪ 10s") { onInteract(); onSeekBackward() }
+        ControlBarButton(if (isPlaying) "⏸ Pausa" else "▶ Reproduzir", Modifier.focusRequester(firstRequester)) {
+            onInteract(); onPlayPause()
+        }
         ControlBarButton("10s ⏩") { onInteract(); onSeekForward() }
+        if (hasNextEpisode) ControlBarButton("⏭ Próximo ep.") { onInteract(); onNextEpisode() }
         ControlBarButton("CC Legendas") { onInteract(); onSubtitles() }
         ControlBarButton("🔊 Áudio") { onInteract(); onAudio() }
         ControlBarButton("Vel. $speedLabel") { onInteract(); onSpeed() }
+        ControlBarButton(if (isFavorite) "★ Favorito" else "☆ Favorito") { onInteract(); onToggleFavorite() }
+    }
+}
+
+/** Live-channel actions, reachable with D-pad → (right) and OK only. */
+@Composable
+internal fun LiveControlBar(
+    isPaused: Boolean,
+    behindLive: Boolean,
+    isFavorite: Boolean,
+    statsVisible: Boolean,
+    canRecall: Boolean,
+    onPlayPause: () -> Unit,
+    onGoLive: () -> Unit,
+    onSubtitles: () -> Unit,
+    onAudio: () -> Unit,
+    onStats: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onRecall: () -> Unit,
+    onInteract: () -> Unit,
+) {
+    val firstRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(80)
+        runCatching { firstRequester.requestFocus() }
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        ControlBarButton(if (isPaused) "▶ Retomar" else "⏸ Pausar direto", Modifier.focusRequester(firstRequester)) {
+            onInteract(); onPlayPause()
+        }
+        if (behindLive) ControlBarButton("⏭ Ir para o direto") { onInteract(); onGoLive() }
+        if (canRecall) ControlBarButton("↺ Canal anterior") { onInteract(); onRecall() }
+        ControlBarButton("🔊 Áudio") { onInteract(); onAudio() }
+        ControlBarButton("CC Legendas") { onInteract(); onSubtitles() }
+        ControlBarButton(if (statsVisible) "📊 Ocultar estatísticas" else "📊 Estatísticas") { onInteract(); onStats() }
         ControlBarButton(if (isFavorite) "★ Favorito" else "☆ Favorito") { onInteract(); onToggleFavorite() }
     }
 }

@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.first
 import pt.iptvplayer.tv.model.Playlist
 import pt.iptvplayer.tv.model.Channel
 import pt.iptvplayer.tv.model.EpgProgram
+import pt.iptvplayer.tv.model.EpgReminder
+import pt.iptvplayer.tv.model.WatchHistoryItem
 import pt.iptvplayer.tv.model.StreamType
 import pt.iptvplayer.tv.model.PlaylistSummary
 import pt.iptvplayer.tv.parser.M3uParser
@@ -260,6 +262,61 @@ class CatalogRepository(
                 database.savePlaybackPosition(playlistId, mediaKey(channel), positionMs, durationMs)
             }
         }
+
+    /**
+     * Remembers [channel] (the replayable reference, before link resolution) as just watched.
+     * [parent] is the series an episode belongs to; [upNext] queues an episode that hasn't been
+     * started yet so it shows up in "Continuar a ver".
+     */
+    suspend fun recordPlayback(channel: Channel, parent: Channel? = null, upNext: Boolean = false) =
+        withContext(Dispatchers.IO) {
+            val playlistId = currentPlaylistId ?: return@withContext
+            if (channel.url.startsWith("catalog://")) return@withContext
+            database.recordHistory(
+                playlistId = playlistId,
+                mediaKey = mediaKey(channel),
+                channel = channel,
+                parent = parent,
+                subtitle = parent?.name ?: channel.group,
+                artwork = channel.logo.ifBlank { parent?.logo.orEmpty() },
+                upNext = upNext,
+            )
+        }
+
+    suspend fun continueWatching(): List<WatchHistoryItem> = withContext(Dispatchers.IO) {
+        val playlistId = currentPlaylistId ?: return@withContext emptyList()
+        database.continueWatching(playlistId)
+    }
+
+    suspend fun removeFromContinueWatching(item: WatchHistoryItem) = withContext(Dispatchers.IO) {
+        val playlistId = currentPlaylistId ?: return@withContext
+        database.removeHistory(playlistId, item.mediaKey)
+    }
+
+    suspend fun recentLive(): List<Channel> = withContext(Dispatchers.IO) {
+        val playlistId = currentPlaylistId ?: return@withContext emptyList()
+        database.recentLive(playlistId)
+    }
+
+    suspend fun recentlyAdded(type: StreamType, limit: Int = 20): List<Channel> = withContext(Dispatchers.IO) {
+        val playlistId = currentPlaylistId ?: return@withContext emptyList()
+        database.recentlyAdded(playlistId, type, limit)
+    }
+
+    suspend fun reminders(): List<EpgReminder> = withContext(Dispatchers.IO) {
+        val playlistId = currentPlaylistId ?: return@withContext emptyList()
+        database.reminders(playlistId)
+    }
+
+    suspend fun addReminder(reminder: EpgReminder) = withContext(Dispatchers.IO) {
+        val playlistId = currentPlaylistId ?: error("Seleciona primeiro uma playlist.")
+        database.saveReminder(playlistId, reminder)
+    }
+
+    suspend fun removeReminder(reminder: EpgReminder) = withContext(Dispatchers.IO) {
+        val playlistId = currentPlaylistId ?: return@withContext
+        database.deleteReminder(playlistId, reminder.tvgId, reminder.startMillis)
+    }
 
     suspend fun loadAdditionalCatalog(
         type: StreamType,

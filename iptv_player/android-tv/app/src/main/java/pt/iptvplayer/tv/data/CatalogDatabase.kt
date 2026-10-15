@@ -28,6 +28,18 @@ class CatalogDatabase(context: Context) :
         db.setForeignKeyConstraintsEnabled(true)
     }
 
+    // watch_history and epg_reminders are owned by this helper only (Room never maps them), so
+    // they are created idempotently on every open instead of bumping the shared schema version:
+    // Room and this helper open the same file, and a version Room doesn't know would make it
+    // refuse to open the database.
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        if (!db.isReadOnly) {
+            createWatchHistoryTable(db)
+            createRemindersTable(db)
+        }
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         createPlaylistsTable(db)
         createChannelsTable(db)
@@ -110,6 +122,39 @@ class CatalogDatabase(context: Context) :
             )""".trimIndent(),
         )
         db.execSQL("CREATE INDEX IF NOT EXISTS playback_progress_playlist ON playback_progress(playlist_id)")
+    }
+
+    private fun createWatchHistoryTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS watch_history (
+                playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                media_key TEXT NOT NULL,
+                stream_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                subtitle TEXT NOT NULL DEFAULT '',
+                artwork TEXT NOT NULL DEFAULT '',
+                encrypted_channel TEXT NOT NULL,
+                encrypted_parent TEXT NOT NULL DEFAULT '',
+                up_next INTEGER NOT NULL DEFAULT 0,
+                played_at INTEGER NOT NULL,
+                PRIMARY KEY (playlist_id, media_key)
+            )""".trimIndent(),
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS watch_history_recent ON watch_history(playlist_id, played_at)")
+    }
+
+    private fun createRemindersTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS epg_reminders (
+                playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                tvg_id TEXT NOT NULL,
+                start_millis INTEGER NOT NULL,
+                stop_millis INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                encrypted_channel TEXT NOT NULL,
+                PRIMARY KEY (playlist_id, tvg_id, start_millis)
+            )""".trimIndent(),
+        )
     }
 
     private fun createEpgTable(db: SQLiteDatabase) {
@@ -478,6 +523,174 @@ class CatalogDatabase(context: Context) :
             },
             SQLiteDatabase.CONFLICT_REPLACE,
         )
+    }
+
+    @Synchronized
+    fun recordHistory(
+        playlistId: Long,
+        mediaKey: String,
+        channel: Channel,
+        parent: Channel?,
+        subtitle: String,
+        artwork: String,
+        upNext: Boolean = false,
+        playedAtMillis: Long = System.currentTimeMillis(),
+    ) {
+        val db = writableDatabase
+        db.transaction {
+            db.insertWithOnConflict(
+                "watch_history",
+                null,
+                ContentValues().apply {
+                    put("playlist_id", playlistId)
+                    put("media_key", mediaKey)
+                    put("stream_type", channel.type.name)
+                    put("title", channel.name)
+                    put("subtitle", subtitle)
+                    put("artwork", artwork)
+                    put("encrypted_channel", cipher.encrypt(ChannelCodec.encode(channel)))
+                    put("encrypted_parent", parent?.let { cipher.encrypt(ChannelCodec.encode(it)) } ?: "")
+                    put("up_next", if (upNext) 1 else 0)
+                    put("played_at", playedAtMillis)
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+            db.execSQL(
+                """DELETE FROM watch_history WHERE playlist_id = ? AND media_key NOT IN (
+                    SELECT media_key FROM watch_history WHERE playlist_id = ?
+                    ORDER BY played_at DESC LIMIT $HISTORY_LIMIT
+                )""".trimIndent(),
+                arrayOf(playlistId, playlistId),
+            )
+        }
+    }
+
+    /** In-progress films/episodes plus queued "next episode" entries, newest first. */
+    @Synchronized
+    fun continueWatching(playlistId: Long, limit: Int = 20): List<pt.iptvplayer.tv.model.WatchHistoryItem> {
+        val result = mutableListOf<pt.iptvplayer.tv.model.WatchHistoryItem>()
+        readableDatabase.rawQuery(
+            """SELECT h.media_key, h.title, h.subtitle, h.artwork, h.encrypted_channel, h.encrypted_parent,
+                      h.up_next, h.played_at, p.position_ms, p.duration_ms
+               FROM watch_history h
+               LEFT JOIN playback_progress p ON p.playlist_id = h.playlist_id AND p.media_key = h.media_key
+               WHERE h.playlist_id = ? AND h.stream_type != 'LIVE'
+                 AND (p.media_key IS NOT NULL OR h.up_next = 1)
+               ORDER BY h.played_at DESC LIMIT ?""".trimIndent(),
+            arrayOf(playlistId.toString(), limit.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val channel = ChannelCodec.decode(cipher.decrypt(cursor.getString(4))) ?: continue
+                val parentRaw = cursor.getString(5).orEmpty()
+                result += pt.iptvplayer.tv.model.WatchHistoryItem(
+                    mediaKey = cursor.getString(0),
+                    channel = channel,
+                    parent = if (parentRaw.isBlank()) null else ChannelCodec.decode(cipher.decrypt(parentRaw)),
+                    title = cursor.getString(1),
+                    subtitle = cursor.getString(2).orEmpty(),
+                    artwork = cursor.getString(3).orEmpty(),
+                    upNext = cursor.getInt(6) == 1,
+                    playedAtMillis = cursor.getLong(7),
+                    positionMs = if (cursor.isNull(8)) 0 else cursor.getLong(8),
+                    durationMs = if (cursor.isNull(9)) 0 else cursor.getLong(9),
+                )
+            }
+        }
+        return result
+    }
+
+    /** Recently watched live channels, newest first, for the Início row and "último canal". */
+    @Synchronized
+    fun recentLive(playlistId: Long, limit: Int = 15): List<Channel> {
+        val result = mutableListOf<Channel>()
+        readableDatabase.rawQuery(
+            """SELECT encrypted_channel FROM watch_history
+               WHERE playlist_id = ? AND stream_type = 'LIVE'
+               ORDER BY played_at DESC LIMIT ?""".trimIndent(),
+            arrayOf(playlistId.toString(), limit.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) ChannelCodec.decode(cipher.decrypt(cursor.getString(0)))?.let(result::add)
+        }
+        return result
+    }
+
+    @Synchronized
+    fun removeHistory(playlistId: Long, mediaKey: String) {
+        writableDatabase.delete(
+            "watch_history", "playlist_id = ? AND media_key = ?", arrayOf(playlistId.toString(), mediaKey),
+        )
+    }
+
+    @Synchronized
+    fun clearUpNext(playlistId: Long, mediaKey: String) {
+        writableDatabase.update(
+            "watch_history",
+            ContentValues().apply { put("up_next", 0) },
+            "playlist_id = ? AND media_key = ?",
+            arrayOf(playlistId.toString(), mediaKey),
+        )
+    }
+
+    /** Newest imports first: the differential importer only ever appends new rows. */
+    @Synchronized
+    fun recentlyAdded(playlistId: Long, type: StreamType, limit: Int = 20): List<Channel> {
+        val result = mutableListOf<Channel>()
+        readableDatabase.rawQuery(
+            """SELECT id, name, group_name, logo, tvg_id, stream_type, quality, favorite FROM channels
+               WHERE playlist_id = ? AND stream_type = ? ORDER BY id DESC LIMIT ?""".trimIndent(),
+            arrayOf(playlistId.toString(), type.name, limit.toString()),
+        ).use { cursor -> while (cursor.moveToNext()) result += catalogChannel(cursor) }
+        return result
+    }
+
+    @Synchronized
+    fun saveReminder(playlistId: Long, reminder: pt.iptvplayer.tv.model.EpgReminder) {
+        writableDatabase.insertWithOnConflict(
+            "epg_reminders",
+            null,
+            ContentValues().apply {
+                put("playlist_id", playlistId)
+                put("tvg_id", reminder.tvgId)
+                put("start_millis", reminder.startMillis)
+                put("stop_millis", reminder.stopMillis)
+                put("title", reminder.title)
+                put("encrypted_channel", cipher.encrypt(ChannelCodec.encode(reminder.channel)))
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    @Synchronized
+    fun deleteReminder(playlistId: Long, tvgId: String, startMillis: Long) {
+        writableDatabase.delete(
+            "epg_reminders",
+            "playlist_id = ? AND tvg_id = ? AND start_millis = ?",
+            arrayOf(playlistId.toString(), tvgId, startMillis.toString()),
+        )
+    }
+
+    /** Reminders that have not finished yet, soonest first; finished ones are purged. */
+    @Synchronized
+    fun reminders(playlistId: Long, nowMillis: Long = System.currentTimeMillis()): List<pt.iptvplayer.tv.model.EpgReminder> {
+        writableDatabase.delete("epg_reminders", "stop_millis < ?", arrayOf(nowMillis.toString()))
+        val result = mutableListOf<pt.iptvplayer.tv.model.EpgReminder>()
+        readableDatabase.rawQuery(
+            """SELECT tvg_id, start_millis, stop_millis, title, encrypted_channel FROM epg_reminders
+               WHERE playlist_id = ? ORDER BY start_millis""".trimIndent(),
+            arrayOf(playlistId.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val channel = ChannelCodec.decode(cipher.decrypt(cursor.getString(4))) ?: continue
+                result += pt.iptvplayer.tv.model.EpgReminder(
+                    channel = channel,
+                    tvgId = cursor.getString(0),
+                    title = cursor.getString(3),
+                    startMillis = cursor.getLong(1),
+                    stopMillis = cursor.getLong(2),
+                )
+            }
+        }
+        return result
     }
 
     @Synchronized
@@ -856,5 +1069,6 @@ class CatalogDatabase(context: Context) :
 
     companion object {
         private const val DATABASE_VERSION = 6
+        private const val HISTORY_LIMIT = 200
     }
 }

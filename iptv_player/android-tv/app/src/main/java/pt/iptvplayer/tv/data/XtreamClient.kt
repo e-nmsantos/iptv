@@ -94,6 +94,9 @@ class XtreamClient(private val config: SourceConfig) {
                     url = streamUrl("series", id, item.text("container_extension").ifBlank { "mp4" }),
                     group = "Temporada ${seasonKey.toIntOrNull() ?: seasonKey}",
                     logo = item.optJSONObject("info")?.text("movie_image").orEmpty(),
+                    // Episode titles repeat across series ("S01 E01" / "Temporada 1"); the
+                    // provider's episode id keeps resume positions from colliding.
+                    tvgId = "xtream-episode:$id",
                     type = StreamType.SERIES,
                 )
             }

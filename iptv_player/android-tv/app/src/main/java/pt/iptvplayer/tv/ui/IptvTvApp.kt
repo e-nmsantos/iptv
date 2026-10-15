@@ -67,7 +67,11 @@ import kotlinx.coroutines.delay
 import coil3.compose.AsyncImage
 import pt.iptvplayer.tv.CatalogUiState
 import pt.iptvplayer.tv.CatalogViewModel
+import pt.iptvplayer.tv.data.PlayerSettings
 import pt.iptvplayer.tv.model.Channel
+import pt.iptvplayer.tv.model.EpgProgram
+import pt.iptvplayer.tv.model.EpgReminder
+import pt.iptvplayer.tv.model.WatchHistoryItem
 import pt.iptvplayer.tv.model.PlaylistSummary
 import pt.iptvplayer.tv.model.StreamType
 import pt.iptvplayer.tv.model.projectCatalog
@@ -77,13 +81,18 @@ internal val Panel = Color(0xFF10243A)
 internal val PanelFocused = Color(0xFF193A52)
 internal val Accent = Color(0xFF41D3BD)
 internal val Muted = Color(0xFFA6B4C4)
-private enum class MainDestination { HOME, CATALOG, EPG, LISTS, ADD, DIAGNOSTICS }
+private enum class MainDestination { HOME, CATALOG, EPG, LISTS, ADD, SETTINGS, DIAGNOSTICS }
 internal enum class AddMethod { M3U_URL, XTREAM, STALKER }
 
 @Composable
 fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val settings by viewModel.playerSettings.collectAsStateWithLifecycle()
     var playing by remember { mutableStateOf<Channel?>(null) }
+    // The replayable reference behind `playing` (before Stalker link resolution), so the
+    // "canal anterior" key can tune back to it even after a temporary link has expired.
+    var playingSource by remember { mutableStateOf<Channel?>(null) }
+    var previousChannel by remember { mutableStateOf<Channel?>(null) }
     var playerNotice by remember { mutableStateOf<String?>(null) }
     // Lifted above the PlayerScreen/CatalogScreen toggle: CatalogScreen is fully disposed
     // while playing, so anything that must survive a play-then-back trip has to live here.
@@ -92,79 +101,134 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
     var viewAsList by remember { mutableStateOf(false) }
     val gridStateCache = remember { mutableMapOf<Any, LazyGridState>() }
     val listStateCache = remember { mutableMapOf<Any, LazyListState>() }
+
+    fun startPlayback(candidate: Channel, parent: Channel? = null) {
+        lastFocusedChannelId = candidate.id
+        if (playing != null) playerNotice = "A mudar para ${candidate.name}…"
+        viewModel.preparePlayback(
+            candidate,
+            onReady = { ready ->
+                if (ready.url.startsWith("catalog://")) {
+                    playerNotice = null
+                    viewModel.openSeries(ready)
+                    destination = MainDestination.CATALOG
+                    return@preparePlayback
+                }
+                val leaving = playingSource
+                if (leaving != null && leaving.type == StreamType.LIVE && ready.type == StreamType.LIVE &&
+                    !sameChannel(leaving, candidate)
+                ) {
+                    previousChannel = leaving
+                }
+                playerNotice = null
+                playing = ready
+                playingSource = candidate
+                viewModel.loadGuideChannels(ready.type)
+            },
+            onError = { if (playing != null) playerNotice = it },
+            parent = parent,
+        )
+    }
+
+    LaunchedEffect(state.startupChannel) {
+        val startup = state.startupChannel ?: return@LaunchedEffect
+        viewModel.consumeStartupChannel()
+        if (playing == null) startPlayback(startup)
+    }
+
     MaterialTheme {
         if (playing != null) {
             // guideChannels holds every channel of the type currently playing (loaded fresh on
             // each play/zap below) — falls back to the catalog browser's own filtered list only
             // until that finishes loading, so the in-player guide's "Todos" always has every
             // group to show instead of just whichever one was selected before pressing play.
-            val playbackChannels = remember(state.guideChannels, state.channels, playing!!.type) {
-                state.guideChannels.filter { it.type == playing!!.type }
-                    .ifEmpty { state.channels.filter { it.type == playing!!.type } }
+            val current = playing!!
+            val playbackChannels = remember(state.guideChannels, state.channels, current.type) {
+                state.guideChannels.filter { it.type == current.type }
+                    .ifEmpty { state.channels.filter { it.type == current.type } }
             }
+            val nextEpisode = remember(state.episodeContext, current) { viewModel.nextEpisode(current) }
             PlayerScreen(
-                channel = playing!!,
+                channel = current,
                 channels = playbackChannels,
+                settings = settings,
+                epg = state.epg,
+                nextEpisode = nextEpisode,
+                dueReminder = state.dueReminder,
                 notice = playerNotice,
+                canRecallPrevious = previousChannel != null,
                 onToggleFavorite = { channel ->
                     viewModel.toggleFavorite(channel)
                     playing = playing?.copy(favorite = !channel.favorite)
                 },
                 onSaveProgress = viewModel::savePlaybackProgress,
-                onSelectChannel = { candidate ->
-                    lastFocusedChannelId = candidate.id
-                    playerNotice = "A mudar para ${candidate.name}…"
-                    viewModel.preparePlayback(
-                        candidate,
-                        onReady = { ready -> playerNotice = null; playing = ready; viewModel.loadGuideChannels(ready.type) },
-                        onError = { playerNotice = it },
-                    )
+                onSelectChannel = { candidate -> startPlayback(candidate) },
+                onRecallPrevious = { previousChannel?.let { startPlayback(it) } },
+                onPlayNextEpisode = { next ->
+                    startPlayback(next, parent = state.episodeContext?.series?.takeIf { it.url.startsWith("catalog://") })
                 },
-                onBack = { playerNotice = null; playing = null },
+                onEpisodeFinished = viewModel::queueNextEpisode,
+                onToggleStats = { viewModel.updateSettings { it.copy(showStreamStats = !it.showStreamStats) } },
+                onWatchReminder = { reminder ->
+                    viewModel.dismissDueReminder()
+                    startPlayback(reminder.channel)
+                },
+                onDismissReminder = viewModel::dismissDueReminder,
+                onBack = {
+                    playerNotice = null
+                    playing = null
+                    playingSource = null
+                    viewModel.refreshHome()
+                },
             )
         } else {
-            CatalogScreen(
-                state = state,
-                gridStateCache = gridStateCache,
-                listStateCache = listStateCache,
-                lastFocusedChannelId = lastFocusedChannelId,
-                onFocusChannel = { id -> lastFocusedChannelId = id },
-                onSelectType = viewModel::selectType,
-                onSelectGroup = viewModel::selectGroup,
-                onQuery = viewModel::setQuery,
-                onImportUrl = viewModel::importUrl,
-                onImportXtream = viewModel::importXtream,
-                onImportStalker = viewModel::importStalker,
-                onPickDocument = onPickDocument,
-                onStartPairing = viewModel::startPairing,
-                onStopPairing = viewModel::stopPairing,
-                onCloseSeries = viewModel::closeSeries,
-                onPlay = { channel ->
-                    lastFocusedChannelId = channel.id
-                    viewModel.preparePlayback(
-                        channel,
-                        onReady = { ready ->
-                            if (ready.url.startsWith("catalog://")) {
-                                viewModel.openSeries(ready)
-                            } else {
-                                playing = ready
-                                viewModel.loadGuideChannels(ready.type)
-                            }
+            Box(Modifier.fillMaxSize()) {
+                CatalogScreen(
+                    state = state,
+                    settings = settings,
+                    gridStateCache = gridStateCache,
+                    listStateCache = listStateCache,
+                    lastFocusedChannelId = lastFocusedChannelId,
+                    onFocusChannel = { id -> lastFocusedChannelId = id },
+                    onSelectType = viewModel::selectType,
+                    onSelectGroup = viewModel::selectGroup,
+                    onQuery = viewModel::setQuery,
+                    onImportUrl = viewModel::importUrl,
+                    onImportXtream = viewModel::importXtream,
+                    onImportStalker = viewModel::importStalker,
+                    onPickDocument = onPickDocument,
+                    onStartPairing = viewModel::startPairing,
+                    onStopPairing = viewModel::stopPairing,
+                    onCloseSeries = viewModel::closeSeries,
+                    onPlay = { channel -> startPlayback(channel) },
+                    onResume = { item -> startPlayback(item.channel, parent = item.parent) },
+                    onRemoveFromContinue = viewModel::removeFromContinueWatching,
+                    onToggleReminder = viewModel::toggleReminder,
+                    onUpdateSettings = viewModel::updateSettings,
+                    onClearError = viewModel::clearError,
+                    onSelectPlaylist = viewModel::selectPlaylist,
+                    onRefreshPlaylist = viewModel::refreshPlaylist,
+                    onDeletePlaylist = viewModel::deletePlaylist,
+                    onLoadMore = viewModel::loadNextCatalogPage,
+                    onLoadLiveGuideChannels = viewModel::loadLiveGuideChannels,
+                    onLoadEpgWindow = viewModel::loadEpgWindow,
+                    destination = destination,
+                    onDestinationChange = { destination = it },
+                    viewAsList = viewAsList,
+                    onViewAsListChange = { viewAsList = it },
+                )
+                state.dueReminder?.let { reminder ->
+                    ReminderCard(
+                        reminder = reminder,
+                        onWatch = {
+                            viewModel.dismissDueReminder()
+                            startPlayback(reminder.channel)
                         },
+                        onDismiss = viewModel::dismissDueReminder,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(28.dp),
                     )
-                },
-                onClearError = viewModel::clearError,
-                onSelectPlaylist = viewModel::selectPlaylist,
-                onRefreshPlaylist = viewModel::refreshPlaylist,
-                onDeletePlaylist = viewModel::deletePlaylist,
-                onLoadMore = viewModel::loadNextCatalogPage,
-                onLoadLiveGuideChannels = viewModel::loadLiveGuideChannels,
-                onLoadEpgWindow = viewModel::loadEpgWindow,
-                destination = destination,
-                onDestinationChange = { destination = it },
-                viewAsList = viewAsList,
-                onViewAsListChange = { viewAsList = it },
-            )
+                }
+            }
         }
     }
 }
@@ -172,6 +236,7 @@ fun IptvTvApp(viewModel: CatalogViewModel, onPickDocument: () -> Unit) {
 @Composable
 private fun CatalogScreen(
     state: CatalogUiState,
+    settings: PlayerSettings,
     gridStateCache: MutableMap<Any, LazyGridState>,
     listStateCache: MutableMap<Any, LazyListState>,
     lastFocusedChannelId: Long?,
@@ -186,6 +251,10 @@ private fun CatalogScreen(
     onStartPairing: () -> Unit,
     onStopPairing: () -> Unit,
     onPlay: (Channel) -> Unit,
+    onResume: (WatchHistoryItem) -> Unit,
+    onRemoveFromContinue: (WatchHistoryItem) -> Unit,
+    onToggleReminder: (Channel, EpgProgram) -> Unit,
+    onUpdateSettings: ((PlayerSettings) -> PlayerSettings) -> Unit,
     onCloseSeries: () -> Unit,
     onClearError: () -> Unit,
     onSelectPlaylist: (Long) -> Unit,
@@ -248,6 +317,7 @@ private fun CatalogScreen(
             onSearch = { showSearch = true },
             onPlaylists = { onDestinationChange(MainDestination.LISTS) },
             onImport = { onDestinationChange(MainDestination.ADD) },
+            onSettings = { onDestinationChange(MainDestination.SETTINGS) },
             onDiagnostics = { onDestinationChange(MainDestination.DIAGNOSTICS) },
         )
         Box(
@@ -262,13 +332,18 @@ private fun CatalogScreen(
                 MainDestination.HOME -> HomeScreen(
                     state = state,
                     onPlay = onPlay,
+                    onResume = onResume,
+                    onRemoveFromContinue = onRemoveFromContinue,
+                    onBrowse = { type -> onDestinationChange(MainDestination.CATALOG); onSelectType(type) },
                 )
                 MainDestination.EPG -> EpgScreen(
                     state = state,
                     onLoadChannels = onLoadLiveGuideChannels,
                     onLoadWindow = onLoadEpgWindow,
                     onPlay = onPlay,
+                    onToggleReminder = onToggleReminder,
                 )
+                MainDestination.SETTINGS -> SettingsScreen(settings = settings, onUpdate = onUpdateSettings)
                 MainDestination.LISTS -> PlaylistManagerScreen(
                     playlists = state.playlists,
                     busy = state.loading,
@@ -460,6 +535,7 @@ private fun NavigationSidebar(
     onSearch: () -> Unit,
     onPlaylists: () -> Unit,
     onImport: () -> Unit,
+    onSettings: () -> Unit,
     onDiagnostics: () -> Unit,
 ) {
     Column(
@@ -480,6 +556,7 @@ private fun NavigationSidebar(
         Spacer(Modifier.weight(1f))
         SidebarItem("⌕  Pesquisar", false, onSearch)
         SidebarItem("＋  Adicionar", destination == MainDestination.ADD, onImport)
+        SidebarItem("⚙  Definições", destination == MainDestination.SETTINGS, onSettings)
         SidebarItem("ℹ  Diagnóstico", destination == MainDestination.DIAGNOSTICS, onDiagnostics)
     }
 }
@@ -548,67 +625,6 @@ private fun ActivePlaylistBadge(name: String, multipleAvailable: Boolean, onClic
                 fontWeight = FontWeight.SemiBold,
             )
         }
-    }
-}
-
-@Composable
-private fun HomeScreen(state: CatalogUiState, onPlay: (Channel) -> Unit) {
-    // The active playlist's identity already lives permanently in the sidebar badge, so this
-    // screen doesn't repeat it (that used to surface raw technical identifiers for some
-    // sources, e.g. a Stalker portal's MAC address, as if it were a friendly greeting).
-    val liveNow = remember(state.channels) { state.channels.filter { it.type == StreamType.LIVE }.take(20) }
-    Column(Modifier.fillMaxSize()) {
-        Text("Início", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(26.dp))
-        Text("Favoritos", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(12.dp))
-        if (state.homeFavorites.isEmpty()) {
-            Box(
-                Modifier.fillMaxWidth().height(84.dp).background(Panel, RoundedCornerShape(16.dp)).padding(horizontal = 22.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                Text(
-                    "Marca os teus canais preferidos como favoritos durante a reprodução para os veres aqui.",
-                    color = Muted,
-                )
-            }
-        } else {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(state.homeFavorites, key = { it.id }) { channel ->
-                    HomeChannelCard(channel, state.epg[channel.tvgId]?.firstOrNull(), onPlay)
-                }
-            }
-        }
-        if (liveNow.isNotEmpty()) {
-            Spacer(Modifier.height(28.dp))
-            Text("Em direto agora", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(liveNow, key = { it.id }) { channel ->
-                    HomeChannelCard(channel, state.epg[channel.tvgId]?.firstOrNull(), onPlay)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun HomeChannelCard(
-    channel: Channel,
-    programme: pt.iptvplayer.tv.model.EpgProgram?,
-    onPlay: (Channel) -> Unit,
-) {
-    var focused by remember { mutableStateOf(false) }
-    Column(
-        Modifier.width(245.dp).height(128.dp)
-            .onFocusChanged { focused = it.isFocused }
-            .background(if (focused) PanelFocused else Panel, RoundedCornerShape(14.dp))
-            .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(14.dp))
-            .clickable { onPlay(channel) }.focusable().padding(16.dp),
-    ) {
-        Text(channel.name, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1)
-        Spacer(Modifier.height(8.dp))
-        Text(programme?.title ?: channel.group, color = if (programme == null) Muted else Accent, maxLines = 2)
     }
 }
 

@@ -59,6 +59,7 @@ fun EpgScreen(
     onLoadChannels: () -> Unit,
     onLoadWindow: (fromMillis: Long, toMillis: Long) -> Unit,
     onPlay: (Channel) -> Unit,
+    onToggleReminder: (Channel, EpgProgram) -> Unit,
 ) {
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { onLoadChannels() }
@@ -100,7 +101,7 @@ fun EpgScreen(
 
     Column(Modifier.fillMaxSize()) {
         Text("Guia TV", color = Color.White, fontSize = 29.sp, fontWeight = FontWeight.Bold)
-        Text("Programação ao vivo", color = Muted)
+        Text("OK num programa a decorrer abre o canal · num programa futuro cria um lembrete 🔔", color = Muted)
         Spacer(Modifier.height(18.dp))
         if (state.liveGuideChannels.isEmpty()) {
             StatusMessage(
@@ -136,6 +137,9 @@ fun EpgScreen(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
+                val reminderKeys = remember(state.reminders) {
+                    state.reminders.map { it.tvgId to it.startMillis }.toSet()
+                }
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     itemsIndexed(filteredChannels, key = { _, channel -> channel.id }) { _, channel ->
                         GuideChannelRow(
@@ -144,7 +148,10 @@ fun EpgScreen(
                             windowStart = windowStart,
                             windowEnd = windowEnd,
                             scrollState = timeScrollState,
+                            now = now,
+                            reminderKeys = reminderKeys,
                             onPlay = onPlay,
+                            onToggleReminder = onToggleReminder,
                         )
                     }
                 }
@@ -202,7 +209,10 @@ private fun GuideChannelRow(
     windowStart: Long,
     windowEnd: Long,
     scrollState: androidx.compose.foundation.ScrollState,
+    now: Long,
+    reminderKeys: Set<Pair<String, Long>>,
     onPlay: (Channel) -> Unit,
+    onToggleReminder: (Channel, EpgProgram) -> Unit,
 ) {
     // Gaps in the EPG data become blank filler blocks so every row's total width matches the
     // shared time axis exactly, regardless of missing programme data for parts of the window.
@@ -235,17 +245,28 @@ private fun GuideChannelRow(
                     Box(Modifier.width(widthDp).fillMaxHeight().padding(horizontal = 2.dp))
                 } else {
                     var focused by remember { mutableStateOf(false) }
+                    val programme = block.programme
+                    val upcoming = programme.startMillis > now
+                    val reminded = (programme.channelId to programme.startMillis) in reminderKeys
+                    val airing = programme.startMillis <= now && now < programme.stopMillis
                     Box(
                         Modifier.width(widthDp).fillMaxHeight()
                             .padding(horizontal = 2.dp)
                             .onFocusChanged { focused = it.isFocused }
-                            .background(if (focused) Accent else PanelFocused, RoundedCornerShape(7.dp))
-                            .clickable { onPlay(channel) }
+                            .background(
+                                when {
+                                    focused -> Accent
+                                    airing -> Color(0xFF1F4A62)
+                                    else -> PanelFocused
+                                },
+                                RoundedCornerShape(7.dp),
+                            )
+                            .clickable { if (upcoming) onToggleReminder(channel, programme) else onPlay(channel) }
                             .focusable()
                             .padding(8.dp),
                     ) {
                         Text(
-                            block.programme.title,
+                            (if (reminded) "🔔 " else "") + block.programme.title,
                             color = if (focused) Background else Color.White,
                             fontSize = 12.sp,
                             maxLines = 2,
@@ -260,8 +281,3 @@ private fun GuideChannelRow(
 
 private fun minutesToDp(durationMillis: Long) =
     (durationMillis.coerceAtLeast(0) / MINUTE_MS.toFloat() * MINUTE_WIDTH_DP).dp
-
-private fun formatClock(millis: Long): String {
-    val calendar = Calendar.getInstance().apply { timeInMillis = millis }
-    return "%02d:%02d".format(calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE))
-}

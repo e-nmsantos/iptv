@@ -13,11 +13,18 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import pt.iptvplayer.tv.data.CatalogDatabase
 import pt.iptvplayer.tv.data.CatalogRepository
+import pt.iptvplayer.tv.data.PlayerPreferences
+import pt.iptvplayer.tv.data.PlayerSettings
 import pt.iptvplayer.tv.data.room.RoomCatalogDatabase
 import pt.iptvplayer.tv.model.Channel
+import pt.iptvplayer.tv.model.EpgProgram
+import pt.iptvplayer.tv.model.EpgReminder
+import pt.iptvplayer.tv.model.EpisodeContext
+import pt.iptvplayer.tv.model.WatchHistoryItem
 import pt.iptvplayer.tv.model.PlaylistSummary
 import pt.iptvplayer.tv.model.StreamType
 import pt.iptvplayer.tv.pairing.PairingCoordinator
@@ -36,6 +43,10 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
     private var loadedLimit = CatalogRepository.PAGE_SIZE
     private val mutableState = MutableStateFlow(CatalogUiState())
     val state: StateFlow<CatalogUiState> = mutableState.asStateFlow()
+    private val preferences = PlayerPreferences(application)
+    val playerSettings: StateFlow<PlayerSettings> = preferences.settings
+    private val notifiedReminders = mutableSetOf<Pair<String, Long>>()
+    private var startupChannelChecked = false
 
     init {
         viewModelScope.launch {
@@ -54,7 +65,17 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                 }
                 .onFailure(::showError)
         }
+        viewModelScope.launch {
+            while (true) {
+                checkDueReminders()
+                delay(15_000)
+            }
+        }
     }
+
+    fun updateSettings(transform: (PlayerSettings) -> PlayerSettings) = preferences.update(transform)
+
+    fun consumeStartupChannel() = mutableState.update { it.copy(startupChannel = null) }
 
     fun selectType(type: StreamType) {
         mutableState.update {
@@ -111,7 +132,63 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
     fun savePlaybackProgress(channel: Channel, positionMs: Long, durationMs: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.savePlaybackPosition(channel, positionMs, durationMs) }
+            refreshHome()
         }
+    }
+
+    /** Next episode after [current] in the series being watched, if any. */
+    fun nextEpisode(current: Channel): Channel? {
+        val episodes = mutableState.value.episodeContext?.episodes ?: return null
+        val index = episodes.indexOfFirst { sameEpisode(it, current) }
+        return if (index >= 0) episodes.getOrNull(index + 1) else null
+    }
+
+    /** Queues the episode after [finished] in "Continuar a ver" when it isn't auto-played. */
+    fun queueNextEpisode(finished: Channel) {
+        val next = nextEpisode(finished) ?: return
+        val parent = mutableState.value.episodeContext?.series?.takeIf { it.url.startsWith("catalog://") }
+        viewModelScope.launch {
+            runCatching { repository.recordPlayback(next, parent, upNext = true) }
+            refreshHome()
+        }
+    }
+
+    fun removeFromContinueWatching(item: WatchHistoryItem) {
+        viewModelScope.launch {
+            runCatching { repository.removeFromContinueWatching(item) }
+            refreshHome()
+        }
+    }
+
+    fun toggleReminder(channel: Channel, programme: EpgProgram) {
+        viewModelScope.launch {
+            runCatching {
+                val existing = mutableState.value.reminders.firstOrNull {
+                    it.tvgId == programme.channelId && it.startMillis == programme.startMillis
+                }
+                if (existing != null) {
+                    repository.removeReminder(existing)
+                } else {
+                    repository.addReminder(
+                        EpgReminder(channel, programme.channelId, programme.title, programme.startMillis, programme.stopMillis),
+                    )
+                }
+                repository.reminders()
+            }.onSuccess { reminders -> mutableState.update { it.copy(reminders = reminders) } }
+                .onFailure(::showError)
+        }
+    }
+
+    fun dismissDueReminder() = mutableState.update { it.copy(dueReminder = null) }
+
+    private suspend fun checkDueReminders() {
+        val now = System.currentTimeMillis()
+        val reminders = runCatching { repository.reminders() }.getOrNull() ?: return
+        val due = reminders.firstOrNull { reminder ->
+            reminder.startMillis - REMINDER_LEAD_MS <= now && now < reminder.stopMillis &&
+                notifiedReminders.add(reminder.tvgId to reminder.startMillis)
+        }
+        mutableState.update { it.copy(reminders = reminders, dueReminder = due ?: it.dueReminder) }
     }
 
     fun selectPlaylist(id: Long) {
@@ -177,7 +254,13 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
 
     fun openSeries(channel: Channel) {
         mutableState.update {
-            it.copy(seriesTitle = channel.name, seriesEpisodes = emptyList(), seriesLoading = true, selectedGroup = "Todos")
+            it.copy(
+                seriesTitle = channel.name,
+                seriesEpisodes = emptyList(),
+                seriesLoading = true,
+                selectedGroup = "Todos",
+                openSeries = channel,
+            )
         }
         viewModelScope.launch {
             runCatching { repository.loadSeriesEpisodes(channel) }
@@ -198,13 +281,19 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun closeSeries() = mutableState.update {
-        it.copy(seriesTitle = null, seriesEpisodes = emptyList(), seriesLoading = false, selectedGroup = "Todos")
+        it.copy(seriesTitle = null, seriesEpisodes = emptyList(), seriesLoading = false, selectedGroup = "Todos", openSeries = null)
     }
 
+    /**
+     * Resolves [channel] for playback and remembers it in the watch history. [parent] is the
+     * series of an episode resumed from Início, whose episode list is then fetched so
+     * "Próximo episódio" keeps working outside the series screen.
+     */
     fun preparePlayback(
         channel: Channel,
         onReady: (Channel) -> Unit,
         onError: (String) -> Unit = {},
+        parent: Channel? = null,
     ) {
         playbackJob?.cancel()
         mutableState.update { it.copy(loading = true, error = null) }
@@ -213,6 +302,11 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                 val ready = repository.preparePlayback(channel)
                 mutableState.update { it.copy(loading = false) }
                 onReady(ready)
+                if (!ready.url.startsWith("catalog://")) {
+                    val seriesParent = updateEpisodeContext(channel, parent)
+                    runCatching { repository.recordPlayback(channel, seriesParent) }
+                    refreshHome()
+                }
             } catch (_: CancellationException) {
                 // A new zapping request superseded this one.
             } catch (error: Throwable) {
@@ -295,12 +389,92 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
         refreshHome()
     }
 
-    private fun refreshHome() {
+    /** Returns the series [channel] is an episode of, keeping [CatalogUiState.episodeContext] in step. */
+    private fun updateEpisodeContext(channel: Channel, explicitParent: Channel?): Channel? {
+        val snapshot = mutableState.value
+        if (channel.type != StreamType.SERIES) {
+            mutableState.update { it.copy(episodeContext = null) }
+            return null
+        }
+        val openSeries = snapshot.openSeries
+        if (openSeries != null && snapshot.seriesEpisodes.any { sameEpisode(it, channel) }) {
+            mutableState.update { it.copy(episodeContext = EpisodeContext(openSeries, snapshot.seriesEpisodes)) }
+            return openSeries
+        }
+        val current = snapshot.episodeContext
+        if (current != null && current.episodes.any { sameEpisode(it, channel) }) {
+            return current.series.takeIf { it.url.startsWith("catalog://") }
+        }
+        if (explicitParent != null) {
+            mutableState.update { it.copy(episodeContext = null) }
+            viewModelScope.launch {
+                runCatching { repository.loadSeriesEpisodes(explicitParent) }.onSuccess { episodes ->
+                    if (episodes.any { sameEpisode(it, channel) }) {
+                        mutableState.update { it.copy(episodeContext = EpisodeContext(explicitParent, episodes)) }
+                    }
+                }
+            }
+            return explicitParent
+        }
+        // Plain M3U series have no provider-side series object: their episodes are simply the
+        // entries of the same group, which is also how the catalog lists them.
+        val siblings = snapshot.guideChannels.ifEmpty { snapshot.channels }
+            .filter { it.type == StreamType.SERIES && it.group == channel.group }
+        mutableState.update {
+            it.copy(
+                episodeContext = if (siblings.size > 1) {
+                    EpisodeContext(Channel(name = channel.group, url = "group://${channel.group}", type = StreamType.SERIES), siblings)
+                } else {
+                    null
+                },
+            )
+        }
+        return null
+    }
+
+    private fun sameEpisode(left: Channel, right: Channel): Boolean = when {
+        left.tvgId.isNotBlank() && right.tvgId.isNotBlank() -> left.tvgId == right.tvgId
+        left.id != 0L && right.id != 0L -> left.id == right.id
+        else -> left.name == right.name && left.group == right.group
+    }
+
+    fun refreshHome() {
         viewModelScope.launch {
-            runCatching { repository.favorites() }
-                .onSuccess { favorites -> mutableState.update { it.copy(homeFavorites = favorites) } }
+            runCatching {
+                HomeRows(
+                    favorites = repository.favorites(),
+                    continueWatching = repository.continueWatching(),
+                    recentLive = repository.recentLive(),
+                    recentMovies = repository.recentlyAdded(StreamType.VOD),
+                    recentSeries = repository.recentlyAdded(StreamType.SERIES),
+                )
+            }.onSuccess { rows ->
+                mutableState.update {
+                    it.copy(
+                        homeFavorites = rows.favorites,
+                        continueWatching = rows.continueWatching,
+                        recentLive = rows.recentLive,
+                        recentMovies = rows.recentMovies,
+                        recentSeries = rows.recentSeries,
+                    )
+                }
+                if (!startupChannelChecked) {
+                    startupChannelChecked = true
+                    if (preferences.settings.value.resumeLastChannelOnStart) {
+                        rows.recentLive.firstOrNull()?.let { last -> mutableState.update { it.copy(startupChannel = last) } }
+                    }
+                }
+            }
         }
     }
+
+    private data class HomeRows(
+        val favorites: List<Channel>,
+        val continueWatching: List<WatchHistoryItem>,
+        val recentLive: List<Channel>,
+        val recentMovies: List<Channel>,
+        val recentSeries: List<Channel>,
+    )
 
     private fun loadCatalogPage(reset: Boolean, fetchProviderIfEmpty: Boolean = false) {
         catalogJob?.cancel()
@@ -401,6 +575,11 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                 .onSuccess { window -> mutableState.update { it.copy(epgWindow = window, epgWindowLoading = false) } }
                 .onFailure { mutableState.update { it.copy(epgWindowLoading = false) } }
         }
+    }
+
+    private companion object {
+        /** Reminders fire a minute early so the channel is tuned before the programme starts. */
+        const val REMINDER_LEAD_MS = 60_000L
     }
 
     override fun onCleared() {

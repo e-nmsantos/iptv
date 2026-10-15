@@ -44,6 +44,7 @@ class StalkerClient(private val source: SourceConfig) {
                     url = "stalker-series://${JsonHttpClient.encode(cmd)}?episode=${JsonHttpClient.encode(episode)}",
                     group = "Temporada $seasonNumber",
                     logo = season.text("screenshot_uri"),
+                    tvgId = "stalker-episode:$cmd#$episode",
                     type = StreamType.SERIES,
                     userAgent = USER_AGENT,
                     referer = "$portal/c/",

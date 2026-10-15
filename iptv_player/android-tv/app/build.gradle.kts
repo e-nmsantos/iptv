@@ -14,8 +14,8 @@ android {
         applicationId = "pt.iptvplayer.tv"
         minSdk = 23
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.13.0-beta01"
+        versionCode = 19
+        versionName = "0.14.0-beta01"
 
         // Optional TMDB metadata lookup. Supplied through -PTMDB_API_KEY=... or
         // gradle.properties so no API key is committed to the repository.
@@ -26,6 +26,12 @@ android {
         )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // TV boxes are ARM; x86_64 keeps the emulator working. Dropping 32-bit x86 saves
+        // ~9 MB of FFmpeg native code per APK.
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+        }
     }
 
     buildFeatures {
@@ -91,7 +97,11 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     implementation("androidx.media3:media3-exoplayer:1.11.0")
     implementation("androidx.media3:media3-exoplayer-hls:1.11.0")
+    implementation("androidx.media3:media3-exoplayer-dash:1.11.0")
     implementation("androidx.media3:media3-ui:1.11.0")
+    // Prebuilt FFmpeg audio/video decoders for Media3 (AC-3, E-AC-3, DTS, TrueHD, MP2…),
+    // which many Android TV boxes lack in hardware. Version must track Media3 above.
+    implementation("io.github.anilbeesetti:nextlib-media3ext:1.11.0-0.15.0")
     implementation("com.google.zxing:core:3.5.4")
     implementation("org.json:json:20260719")
     // Coil 3.5 is built with Kotlin 2.4; keep 3.4 until the project compiler is upgraded.

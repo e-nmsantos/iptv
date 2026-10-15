@@ -2,8 +2,11 @@ package pt.iptvplayer.tv
 
 import pt.iptvplayer.tv.model.Channel
 import pt.iptvplayer.tv.model.EpgProgram
+import pt.iptvplayer.tv.model.EpgReminder
+import pt.iptvplayer.tv.model.EpisodeContext
 import pt.iptvplayer.tv.model.PlaylistSummary
 import pt.iptvplayer.tv.model.StreamType
+import pt.iptvplayer.tv.model.WatchHistoryItem
 
 data class CatalogUiState(
     val playlistName: String = "IPTV Player TV",
@@ -33,4 +36,18 @@ data class CatalogUiState(
     val liveGuideChannels: List<Channel> = emptyList(),
     val epgWindow: Map<String, List<EpgProgram>> = emptyMap(),
     val epgWindowLoading: Boolean = false,
+    // Início rows.
+    val continueWatching: List<WatchHistoryItem> = emptyList(),
+    val recentLive: List<Channel> = emptyList(),
+    val recentMovies: List<Channel> = emptyList(),
+    val recentSeries: List<Channel> = emptyList(),
+    /** The series that is open in the catalog browser, so its episodes can carry it as parent. */
+    val openSeries: Channel? = null,
+    /** Episode list of whatever series episode is playing — drives "Próximo episódio". */
+    val episodeContext: EpisodeContext? = null,
+    val reminders: List<EpgReminder> = emptyList(),
+    /** A reminder whose programme has just started; shown as a banner until dismissed. */
+    val dueReminder: EpgReminder? = null,
+    /** Channel to open straight away after launch ("Abrir no último canal"); consumed once. */
+    val startupChannel: Channel? = null,
 )

@@ -1,5 +1,7 @@
 package pt.iptvplayer.tv.ui
 
+import android.net.Uri
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.widget.FrameLayout
@@ -22,6 +24,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -34,45 +38,54 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
+import pt.iptvplayer.tv.R
+import pt.iptvplayer.tv.data.PlayerSettings
 import pt.iptvplayer.tv.model.Channel
+import pt.iptvplayer.tv.model.EpgProgram
+import pt.iptvplayer.tv.model.EpgReminder
 import pt.iptvplayer.tv.model.StreamType
 import pt.iptvplayer.tv.playback.PlaybackMetrics
-import pt.iptvplayer.tv.R
-
-import android.net.Uri
-import androidx.media3.common.MimeTypes
+import pt.iptvplayer.tv.playback.StreamStats
+import pt.iptvplayer.tv.playback.buildPlayerSession
 
 @Composable
 @OptIn(UnstableApi::class)
 fun PlayerScreen(
     channel: Channel,
     channels: List<Channel>,
+    settings: PlayerSettings,
+    epg: Map<String, List<EpgProgram>>,
+    nextEpisode: Channel?,
+    dueReminder: EpgReminder?,
     notice: String? = null,
+    canRecallPrevious: Boolean,
     onToggleFavorite: (Channel) -> Unit,
     onSaveProgress: (Channel, Long, Long) -> Unit,
     onSelectChannel: (Channel) -> Unit,
+    onRecallPrevious: () -> Unit,
+    onPlayNextEpisode: (Channel) -> Unit,
+    onEpisodeFinished: (Channel) -> Unit,
+    onToggleStats: () -> Unit,
+    onWatchReminder: (EpgReminder) -> Unit,
+    onDismissReminder: () -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    var guideVisible by remember { mutableStateOf(true) }
+    val isLive = channel.type == StreamType.LIVE
+    var guideVisible by remember { mutableStateOf(false) }
     var guideCategory by remember(channels) { mutableStateOf(channel.group.ifBlank { "Todos" }) }
     var playbackError by remember(channel.url) { mutableStateOf<String?>(null) }
     var lastFailure by remember(channel.url) { mutableStateOf<String?>(null) }
@@ -84,41 +97,38 @@ fun PlayerScreen(
     var showOnlineSubs by remember { mutableStateOf(false) }
     var showAudio by remember { mutableStateOf(false) }
     var speed by remember(channel.url) { mutableStateOf(1f) }
-    var seekTick by remember(channel.url) { mutableStateOf(0) }
+    var seekTick by remember(channel.url) { mutableIntStateOf(0) }
     var seekBarVisible by remember { mutableStateOf(false) }
     var controlsVisible by remember(channel.url) { mutableStateOf(false) }
-    var controlsHideTick by remember(channel.url) { mutableStateOf(0) }
+    var controlsHideTick by remember(channel.url) { mutableIntStateOf(0) }
     var isPlaying by remember(channel.url) { mutableStateOf(true) }
-    var showControlsHint by remember(channel.url) { mutableStateOf(channel.type != StreamType.LIVE) }
+    var paused by remember(channel.url) { mutableStateOf(false) }
+    var showControlsHint by remember(channel.url) { mutableStateOf(!isLive) }
+    // Live "now/next" banner, re-shown on every zap and with the INFO key.
+    var infoTick by remember(channel.url) { mutableIntStateOf(if (isLive) 1 else 0) }
+    var infoVisible by remember(channel.url) { mutableStateOf(isLive) }
+    var statsVisible by remember { mutableStateOf(settings.showStreamStats) }
+    var stats by remember(channel.url) { mutableStateOf(StreamStats()) }
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    // Number zapping.
+    val numberEntry = remember { ChannelNumberEntry() }
+    var typedNumber by remember { mutableStateOf("") }
+    var numberTick by remember { mutableIntStateOf(0) }
+    // Live pause (timeshift): how far behind the broadcast the picture currently is.
+    var behindLiveMs by remember(channel.url) { mutableLongStateOf(0L) }
+    var livePausedAt by remember(channel.url) { mutableStateOf<Long?>(null) }
+    var liveBaselineOffsetMs by remember(channel.url) { mutableStateOf<Long?>(null) }
+    var transientNotice by remember(channel.url) { mutableStateOf<String?>(null) }
+    // End-of-episode handling.
+    var nextCardVisible by remember(channel.url) { mutableStateOf(false) }
+    var nextCountdown by remember(channel.url) { mutableStateOf<Int?>(null) }
+    var nextDismissed by remember(channel.url) { mutableStateOf(false) }
+    var ended by remember(channel.url) { mutableStateOf(false) }
+
     val metrics = remember(channel.url) { PlaybackMetrics() }
     val currentIndex = channels.indexOfFirst { sameChannel(it, channel) }.coerceAtLeast(0)
-    val player = remember(channel.url) {
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(60_000)
-            .setUserAgent(channel.userAgent.ifBlank { "IPTVPlayerTV/0.9" })
-            .setDefaultRequestProperties(
-                mapOf("Connection" to "keep-alive", "Accept-Encoding" to "identity") + channel.requestHeaders,
-            )
-        val mediaSourceFactory = DefaultMediaSourceFactory(DefaultDataSource.Factory(context, httpFactory))
-            .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(12))
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .setLoadControl(
-                DefaultLoadControl.Builder().setBufferDurationsMs(
-                    15_000, 60_000, 2_500, 5_000,
-                ).build(),
-            )
-            .build()
-            .apply {
-                setWakeMode(C.WAKE_MODE_NETWORK)
-                repeatMode = if (channel.type == StreamType.LIVE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-                setMediaItem(MediaItem.fromUri(channel.url))
-                playWhenReady = true
-                prepare()
-            }
-    }
+    val session = remember(channel.url) { buildPlayerSession(context, channel, settings) }
+    val player = session.player
 
     fun zap(offset: Int) {
         if (channels.size < 2) return
@@ -126,7 +136,7 @@ fun PlayerScreen(
         onSelectChannel(channels[index])
     }
     fun seek(deltaMs: Long) {
-        if (channel.type == StreamType.LIVE) return
+        if (isLive) return
         val duration = player.duration.coerceAtLeast(0)
         val upperBound = if (duration > 0) duration else Long.MAX_VALUE
         player.seekTo((player.currentPosition + deltaMs).coerceIn(0, upperBound))
@@ -141,31 +151,129 @@ fun PlayerScreen(
         }
         player.setPlaybackSpeed(speed)
     }
+    fun flash(message: String) {
+        transientNotice = message
+    }
+    fun showInfo() {
+        infoVisible = true
+        infoTick++
+    }
+    fun pauseLive() {
+        player.pause()
+        if (livePausedAt == null) livePausedAt = SystemClock.elapsedRealtime()
+        if (!session.timeshiftEnabled) flash("Pausa em direto desligada nas Definições: ao retomar, o canal volta ao direto.")
+        showInfo()
+    }
+    fun resumeLive() {
+        livePausedAt?.let { pausedAt ->
+            if (session.timeshiftEnabled && !player.isCurrentMediaItemLive) {
+                behindLiveMs += SystemClock.elapsedRealtime() - pausedAt
+            }
+        }
+        livePausedAt = null
+        if (!session.timeshiftEnabled && !player.isCurrentMediaItemLive) {
+            // Without a timeshift buffer the stalled connection is useless; start fresh at "now".
+            player.stop()
+            player.setMediaItem(MediaItem.fromUri(channel.url))
+            player.prepare()
+        }
+        player.play()
+        showInfo()
+    }
+    fun togglePlayPause() {
+        if (isLive) {
+            if (player.playWhenReady) pauseLive() else resumeLive()
+        } else if (player.isPlaying) {
+            player.pause()
+        } else {
+            player.play()
+        }
+    }
+    fun returnToLive() {
+        if (player.isCurrentMediaItemLive) {
+            player.seekToDefaultPosition()
+        } else {
+            player.stop()
+            player.setMediaItem(MediaItem.fromUri(channel.url))
+            player.prepare()
+        }
+        player.play()
+        behindLiveMs = 0
+        livePausedAt = null
+        flash("De volta ao direto")
+        showInfo()
+    }
+    fun liveSeek(deltaMs: Long) {
+        if (!player.isCurrentMediaItemSeekable) {
+            flash("Este canal não permite avançar ou recuar. Usa ⏯ para pausar o direto.")
+            return
+        }
+        player.seekTo((player.currentPosition + deltaMs).coerceAtLeast(0))
+        showInfo()
+    }
+    fun playNext() {
+        val next = nextEpisode ?: return
+        nextCardVisible = false
+        nextCountdown = null
+        onPlayNextEpisode(next)
+    }
+    fun cancelNext() {
+        nextCardVisible = false
+        nextCountdown = null
+        nextDismissed = true
+        onEpisodeFinished(channel)
+    }
+
     val handleKeyCode: (Int) -> Boolean = { keyCode ->
-        when (playerKeyAction(keyCode, guideVisible, channel.type == StreamType.LIVE, controlsVisible)) {
+        when (playerKeyAction(keyCode, guideVisible, isLive, controlsVisible)) {
             PlayerKeyAction.TOGGLE_GUIDE -> { guideVisible = !guideVisible; true }
             PlayerKeyAction.OPEN_GUIDE -> { guideVisible = true; true }
             PlayerKeyAction.ZAP_PREVIOUS -> { zap(-1); true }
             PlayerKeyAction.ZAP_NEXT -> { zap(1); true }
-            PlayerKeyAction.RECALL_PREVIOUS -> { zap(-1); true }
-            PlayerKeyAction.PLAY_PAUSE -> { if (player.isPlaying) player.pause() else player.play(); true }
-            PlayerKeyAction.PLAY -> { player.play(); true }
-            PlayerKeyAction.PAUSE -> { player.pause(); true }
+            PlayerKeyAction.RECALL_PREVIOUS -> {
+                if (canRecallPrevious) onRecallPrevious() else flash("Ainda não há canal anterior.")
+                true
+            }
+            PlayerKeyAction.PLAY_PAUSE -> { togglePlayPause(); true }
+            PlayerKeyAction.PLAY -> { if (isLive) resumeLive() else player.play(); true }
+            PlayerKeyAction.PAUSE -> { if (isLive) pauseLive() else player.pause(); true }
             PlayerKeyAction.TOGGLE_FAVORITE -> { onToggleFavorite(channel); true }
             PlayerKeyAction.SEEK_FORWARD -> { seek(10_000); true }
             PlayerKeyAction.SEEK_BACKWARD -> { seek(-10_000); true }
+            PlayerKeyAction.LIVE_SEEK_FORWARD -> { liveSeek(30_000); true }
+            PlayerKeyAction.LIVE_SEEK_BACKWARD -> { liveSeek(-30_000); true }
+            PlayerKeyAction.NEXT_EPISODE -> {
+                if (nextEpisode != null) playNext() else flash("Não há próximo episódio.")
+                true
+            }
             PlayerKeyAction.TOGGLE_SUBTITLES -> { showSubtitles = true; true }
+            PlayerKeyAction.OPEN_AUDIO -> { showAudio = true; true }
+            PlayerKeyAction.TOGGLE_STATS -> { statsVisible = !statsVisible; onToggleStats(); true }
+            PlayerKeyAction.TOGGLE_INFO -> {
+                if (infoVisible) infoVisible = false else showInfo()
+                true
+            }
             PlayerKeyAction.SHOW_CONTROLS -> { controlsVisible = true; controlsHideTick++; true }
+            PlayerKeyAction.DIGIT -> {
+                digitForKey(keyCode)?.let { digit ->
+                    typedNumber = numberEntry.push(digit)
+                    numberTick++
+                }
+                true
+            }
             PlayerKeyAction.DELEGATE -> false
         }
     }
 
     BackHandler {
         when {
+            typedNumber.isNotEmpty() -> { numberEntry.clear(); typedNumber = "" }
             guideVisible -> guideVisible = false
             showSubtitles -> showSubtitles = false
             showAudio -> showAudio = false
             controlsVisible -> controlsVisible = false
+            nextCardVisible -> cancelNext()
+            infoVisible && isLive -> infoVisible = false
             else -> onBack()
         }
     }
@@ -175,20 +283,24 @@ fun PlayerScreen(
                 isPlaying = playing
             }
 
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                paused = !playWhenReady
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 buffering = playbackState == Player.STATE_BUFFERING || playbackState == Player.STATE_IDLE
                 if (playbackState == Player.STATE_BUFFERING) metrics.buffering()
                 if (playbackState == Player.STATE_READY) {
                     hasPlayed = true
-                    if (
-                        channel.type != StreamType.LIVE &&
-                        !resumeApplied &&
-                        channel.resumePositionMs > 0
-                    ) {
+                    if (isLive && liveBaselineOffsetMs == null && player.isCurrentMediaItemLive) {
+                        liveBaselineOffsetMs = player.currentLiveOffset.takeIf { it != C.TIME_UNSET }
+                    }
+                    if (!isLive && !resumeApplied && channel.resumePositionMs > 0) {
                         player.seekTo(channel.resumePositionMs)
                         resumeApplied = true
                     }
                 }
+                if (playbackState == Player.STATE_ENDED && !isLive) ended = true
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -196,12 +308,14 @@ fun PlayerScreen(
                 val httpError = generateSequence<Throwable>(error) { it.cause }
                     .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
                     .firstOrNull()
-                lastFailure = if (httpError != null) {
-                    "HTTP ${httpError.responseCode} — o servidor recusou o stream"
-                } else {
-                    "${error.errorCodeName}: ${error.message ?: "stream indisponível"}"
+                lastFailure = when {
+                    httpError != null -> "HTTP ${httpError.responseCode} — o servidor recusou o stream"
+                    error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ->
+                        "Formato não suportado por esta box. Experimenta \"Preferir FFmpeg\" nas Definições."
+                    else -> "${error.errorCodeName}: ${error.message ?: "stream indisponível"}"
                 }
-                if (channel.type != StreamType.LIVE) playbackError = lastFailure
+                if (!isLive) playbackError = lastFailure
                 metrics.log(lastFailure)
             }
 
@@ -216,8 +330,9 @@ fun PlayerScreen(
             player.release()
         }
     }
+    // Live reconnection watchdog.
     LaunchedEffect(player, channel.url) {
-        if (channel.type != StreamType.LIVE) return@LaunchedEffect
+        if (!isLive) return@LaunchedEffect
         var bufferingChecks = 0
         var retries = 0
         var stableChecks = 0
@@ -238,6 +353,7 @@ fun PlayerScreen(
             }
             playbackError = null
             buffering = true
+            behindLiveMs = 0
             player.stop()
             player.clearMediaItems()
             player.setMediaItem(MediaItem.fromUri(channel.url))
@@ -265,7 +381,86 @@ fun PlayerScreen(
             }
         }
     }
-
+    // Clock + live offset + statistics, once a second.
+    LaunchedEffect(player) {
+        while (true) {
+            nowMillis = System.currentTimeMillis()
+            if (isLive && player.isCurrentMediaItemLive) {
+                val offset = player.currentLiveOffset
+                val baseline = liveBaselineOffsetMs
+                if (offset != C.TIME_UNSET && baseline != null) {
+                    behindLiveMs = (offset - baseline).coerceAtLeast(0).let { if (it < 3_000) 0 else it }
+                }
+            }
+            if (statsVisible) stats = session.stats.snapshot(player)
+            delay(1_000)
+        }
+    }
+    // Persist resume points regularly, not only when leaving the player.
+    LaunchedEffect(player) {
+        if (isLive) return@LaunchedEffect
+        while (true) {
+            delay(30_000)
+            if (player.isPlaying) {
+                onSaveProgress(channel, player.currentPosition.coerceAtLeast(0), player.duration.coerceAtLeast(0))
+            }
+        }
+    }
+    // "A seguir" card: offered in the last seconds of an episode, auto-played after it ends.
+    LaunchedEffect(player, nextEpisode) {
+        if (isLive || nextEpisode == null) return@LaunchedEffect
+        while (!nextCardVisible) {
+            val duration = player.duration
+            if (!nextDismissed && duration > 60_000 && duration - player.currentPosition in 1..NEXT_CARD_LEAD_MS) {
+                nextCardVisible = true
+            }
+            delay(1_000)
+        }
+    }
+    LaunchedEffect(ended) {
+        if (!ended) return@LaunchedEffect
+        when {
+            nextEpisode == null -> {
+                delay(1_500)
+                onBack()
+            }
+            nextDismissed -> Unit
+            settings.autoplayNextEpisode -> {
+                nextCardVisible = true
+                for (seconds in AUTOPLAY_COUNTDOWN_SECONDS downTo 1) {
+                    nextCountdown = seconds
+                    delay(1_000)
+                    if (!nextCardVisible) return@LaunchedEffect
+                }
+                playNext()
+            }
+            else -> {
+                nextCardVisible = true
+                onEpisodeFinished(channel)
+            }
+        }
+    }
+    LaunchedEffect(numberTick) {
+        if (numberTick == 0) return@LaunchedEffect
+        delay(1_800)
+        val index = numberEntry.commit(channels.size)
+        typedNumber = ""
+        if (index == null) {
+            flash("Esse número de canal não existe nesta lista.")
+        } else if (index != currentIndex) {
+            onSelectChannel(channels[index])
+        }
+    }
+    LaunchedEffect(infoTick) {
+        if (infoTick == 0) return@LaunchedEffect
+        delay(INFO_BANNER_MS)
+        if (player.playWhenReady) infoVisible = false
+    }
+    LaunchedEffect(transientNotice) {
+        if (transientNotice == null) return@LaunchedEffect
+        delay(3_500)
+        transientNotice = null
+    }
     LaunchedEffect(seekTick) {
         if (seekTick == 0 || controlsVisible) return@LaunchedEffect
         seekBarVisible = true
@@ -277,7 +472,7 @@ fun PlayerScreen(
         delay(6_000)
         controlsVisible = false
     }
-    var positionTick by remember(channel.url) { mutableStateOf(0) }
+    var positionTick by remember(channel.url) { mutableIntStateOf(0) }
     LaunchedEffect(seekBarVisible, controlsVisible) {
         while (seekBarVisible || controlsVisible) {
             positionTick++
@@ -312,13 +507,21 @@ fun PlayerScreen(
                     view.setOnKeyListener { _, keyCode, event ->
                         event.action == KeyEvent.ACTION_DOWN && handleKeyCode(keyCode)
                     }
-                    if (!guideVisible && !controlsVisible) view.requestFocus()
+                    if (!guideVisible && !controlsVisible && !nextCardVisible && dueReminder == null) view.requestFocus()
                 },
                 modifier = Modifier.fillMaxSize(),
             )
             if (((buffering && !hasPlayed) || notice != null) && playbackError == null) {
                 Text(
                     notice ?: "A ligar ao canal…",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    modifier = Modifier.align(Alignment.Center).background(Color(0xB807111F), RoundedCornerShape(9.dp)).padding(14.dp),
+                )
+            }
+            if (isLive && paused && hasPlayed && playbackError == null) {
+                Text(
+                    if (session.timeshiftEnabled) "⏸  Em pausa — o direto continua a ser guardado" else "⏸  Em pausa",
                     color = Color.White,
                     fontSize = 18.sp,
                     modifier = Modifier.align(Alignment.Center).background(Color(0xB807111F), RoundedCornerShape(9.dp)).padding(14.dp),
@@ -341,6 +544,36 @@ fun PlayerScreen(
                 }
             }
         }
+        if (statsVisible) {
+            StreamStatsOverlay(stats, session.timeshiftEnabled, Modifier.align(Alignment.TopStart).padding(28.dp))
+        }
+        if (typedNumber.isNotEmpty()) {
+            val previewIndex = typedNumber.toIntOrNull()?.minus(1)
+            ChannelNumberOverlay(
+                digits = typedNumber,
+                preview = previewIndex?.let { channels.getOrNull(it) },
+                modifier = Modifier.align(Alignment.TopEnd).padding(28.dp),
+            )
+        }
+        transientNotice?.let { message ->
+            Text(
+                message,
+                color = Color.White,
+                fontSize = 15.sp,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 28.dp)
+                    .background(Color(0xE6040A12), RoundedCornerShape(10.dp)).padding(horizontal = 18.dp, vertical = 10.dp),
+            )
+        }
+        if (isLive && infoVisible && !guideVisible && !controlsVisible) {
+            LiveInfoBanner(
+                channel = channel,
+                channelNumber = currentIndex + 1,
+                programmes = epg[channel.tvgId].orEmpty(),
+                nowMillis = nowMillis,
+                behindLiveMs = behindLiveMs,
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
+        }
         if (guideVisible) {
             ChannelGuide(
                 channels = channels,
@@ -352,7 +585,7 @@ fun PlayerScreen(
                 modifier = Modifier.align(Alignment.CenterStart).width(600.dp).fillMaxHeight(),
             )
         }
-        if (showControlsHint && channel.type != StreamType.LIVE && !guideVisible && !controlsVisible) {
+        if (showControlsHint && !isLive && !guideVisible && !controlsVisible) {
             Text(
                 "▲ ou ▼ para abrir os controlos",
                 color = PlayerMuted,
@@ -361,17 +594,14 @@ fun PlayerScreen(
                     .background(Color(0xB807111F), RoundedCornerShape(8.dp)).padding(horizontal = 14.dp, vertical = 8.dp),
             )
         }
-        if (seekBarVisible && !controlsVisible && channel.type != StreamType.LIVE && !guideVisible) {
+        if (seekBarVisible && !controlsVisible && !isLive && !guideVisible) {
             val position = remember(positionTick) { player.currentPosition.coerceAtLeast(0) }
             val duration = remember(positionTick) { player.duration.coerceAtLeast(0) }
-            val fraction = if (duration > 0) (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 48.dp, vertical = 30.dp)
                     .background(Color(0xE60B1929), RoundedCornerShape(12.dp)).padding(20.dp),
             ) {
-                Box(Modifier.fillMaxWidth().height(6.dp).background(Color(0x33FFFFFF), RoundedCornerShape(3.dp))) {
-                    Box(Modifier.fillMaxWidth(fraction).height(6.dp).background(PlayerAccent, RoundedCornerShape(3.dp)))
-                }
+                ProgressLine(if (duration > 0) position.toFloat() / duration else 0f, Modifier.fillMaxWidth(), height = 6)
                 Spacer(Modifier.height(10.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(formatDuration(position), color = Color.White, fontSize = 14.sp)
@@ -379,40 +609,84 @@ fun PlayerScreen(
                 }
             }
         }
-        // Discoverable, D-pad + OK only control panel — the sole reliable input on a bare
+        // Discoverable, D-pad + OK only control panels — the sole reliable input on a bare
         // remote with no colour/media-transport/captions keys (e.g. a minimal Android TV box
-        // remote). Opened with D-pad up/down; every action inside it is reachable the same way.
-        if (controlsVisible && channel.type != StreamType.LIVE && !guideVisible) {
-            val position = remember(positionTick) { player.currentPosition.coerceAtLeast(0) }
-            val duration = remember(positionTick) { player.duration.coerceAtLeast(0) }
-            val fraction = if (duration > 0) (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f
+        // remote). Opened with D-pad up/down (VOD) or right (live).
+        if (controlsVisible && !guideVisible) {
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 40.dp, vertical = 28.dp)
                     .background(Color(0xE60B1929), RoundedCornerShape(14.dp)).padding(20.dp),
             ) {
-                Box(Modifier.fillMaxWidth().height(6.dp).background(Color(0x33FFFFFF), RoundedCornerShape(3.dp))) {
-                    Box(Modifier.fillMaxWidth(fraction).height(6.dp).background(PlayerAccent, RoundedCornerShape(3.dp)))
+                if (isLive) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(channel.name, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(12.dp))
+                        if (behindLiveMs > 1_000) {
+                            Badge("EM DIFERIDO −${formatDuration(behindLiveMs)}", Color(0xFFF0B429), Color.Black)
+                        } else {
+                            Badge("● DIRETO", Color(0xFFE50914), Color.White)
+                        }
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    LiveControlBar(
+                        isPaused = paused,
+                        behindLive = behindLiveMs > 1_000 || livePausedAt != null,
+                        isFavorite = channel.favorite,
+                        statsVisible = statsVisible,
+                        canRecall = canRecallPrevious,
+                        onPlayPause = { togglePlayPause() },
+                        onGoLive = { returnToLive() },
+                        onSubtitles = { showSubtitles = true },
+                        onAudio = { showAudio = true },
+                        onStats = { statsVisible = !statsVisible; onToggleStats() },
+                        onToggleFavorite = { onToggleFavorite(channel) },
+                        onRecall = onRecallPrevious,
+                        onInteract = { controlsHideTick++ },
+                    )
+                } else {
+                    val position = remember(positionTick) { player.currentPosition.coerceAtLeast(0) }
+                    val duration = remember(positionTick) { player.duration.coerceAtLeast(0) }
+                    ProgressLine(if (duration > 0) position.toFloat() / duration else 0f, Modifier.fillMaxWidth(), height = 6)
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(formatDuration(position), color = Color.White, fontSize = 13.sp)
+                        Text(if (duration > 0) formatDuration(duration) else "--:--", color = PlayerMuted, fontSize = 13.sp)
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    PlayerControlBar(
+                        isPlaying = isPlaying,
+                        isFavorite = channel.favorite,
+                        speedLabel = formatSpeed(speed),
+                        hasNextEpisode = nextEpisode != null,
+                        onSeekBackward = { seek(-10_000) },
+                        onPlayPause = { togglePlayPause() },
+                        onSeekForward = { seek(10_000) },
+                        onSubtitles = { showSubtitles = true },
+                        onAudio = { showAudio = true },
+                        onSpeed = { cycleSpeed() },
+                        onToggleFavorite = { onToggleFavorite(channel) },
+                        onNextEpisode = { playNext() },
+                        onInteract = { controlsHideTick++ },
+                    )
                 }
-                Spacer(Modifier.height(6.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatDuration(position), color = Color.White, fontSize = 13.sp)
-                    Text(if (duration > 0) formatDuration(duration) else "--:--", color = PlayerMuted, fontSize = 13.sp)
-                }
-                Spacer(Modifier.height(16.dp))
-                PlayerControlBar(
-                    isPlaying = isPlaying,
-                    isFavorite = channel.favorite,
-                    speedLabel = formatSpeed(speed),
-                    onSeekBackward = { seek(-10_000) },
-                    onPlayPause = { if (player.isPlaying) player.pause() else player.play() },
-                    onSeekForward = { seek(10_000) },
-                    onSubtitles = { showSubtitles = true },
-                    onAudio = { showAudio = true },
-                    onSpeed = { cycleSpeed() },
-                    onToggleFavorite = { onToggleFavorite(channel) },
-                    onInteract = { controlsHideTick++ },
-                )
             }
+        }
+        if (nextCardVisible && nextEpisode != null && !guideVisible) {
+            NextEpisodeCard(
+                next = nextEpisode,
+                secondsLeft = nextCountdown,
+                onPlayNow = { playNext() },
+                onCancel = { cancelNext() },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(36.dp),
+            )
+        }
+        dueReminder?.let { reminder ->
+            ReminderCard(
+                reminder = reminder,
+                onWatch = { onWatchReminder(reminder) },
+                onDismiss = onDismissReminder,
+                modifier = Modifier.align(Alignment.TopEnd).padding(28.dp),
+            )
         }
         if (showSubtitles) {
             val textGroups = tracksState?.groups?.filter { it.type == C.TRACK_TYPE_TEXT } ?: emptyList()
@@ -453,10 +727,12 @@ fun PlayerScreen(
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-                Button(onClick = { showOnlineSubs = true; showSubtitles = false }) {
-                    Text("🔍 Procurar Legendas Online...")
+                if (!isLive) {
+                    Button(onClick = { showOnlineSubs = true; showSubtitles = false }) {
+                        Text("🔍 Procurar Legendas Online...")
+                    }
+                    Spacer(Modifier.height(8.dp))
                 }
-                Spacer(Modifier.height(8.dp))
                 Button(onClick = { showSubtitles = false }) { Text("Fechar") }
             }
         }
@@ -503,11 +779,18 @@ fun PlayerScreen(
                 } else {
                     audioGroups.forEachIndexed { groupIndex, group ->
                         for (trackIndex in 0 until group.length) {
-                            if (!group.isTrackSupported(trackIndex)) continue
                             val format = group.getTrackFormat(trackIndex)
-                            val label = format.label
+                            val supported = group.isTrackSupported(trackIndex)
+                            val base = format.label
                                 ?: format.language?.uppercase()
                                 ?: "Faixa ${groupIndex + 1}"
+                            val codec = format.sampleMimeType?.substringAfter('/')?.uppercase().orEmpty()
+                            val label = listOf(base, codec).filter(String::isNotBlank).joinToString(" · ") +
+                                if (supported) "" else " (não suportada)"
+                            if (!supported) {
+                                Text(label, color = PlayerMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp, horizontal = 14.dp))
+                                continue
+                            }
                             SubtitleOption(label, selected = group.isTrackSelected(trackIndex)) {
                                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                                     .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
@@ -524,3 +807,7 @@ fun PlayerScreen(
         }
     }
 }
+
+private const val INFO_BANNER_MS = 5_000L
+private const val NEXT_CARD_LEAD_MS = 20_000L
+private const val AUTOPLAY_COUNTDOWN_SECONDS = 10
