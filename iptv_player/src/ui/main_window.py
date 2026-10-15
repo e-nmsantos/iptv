@@ -402,7 +402,6 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
         playlist_layout.setContentsMargins(5, 5, 5, 0)
         playlist_layout.setSpacing(0)
         self._playlist_widget = PlaylistWidget()
-        left_panel.addWidget(self._playlist_widget)
         playlist_layout.addWidget(self._playlist_widget)
         left_panel.addWidget(playlist_container)
 
@@ -430,6 +429,8 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
 
         left_panel.addWidget(content_container)
         left_panel.setSizes([200, 400])
+        left_panel.setStretchFactor(0, 0)
+        left_panel.setStretchFactor(1, 1)
 
         splitter.addWidget(left_panel)
 
@@ -480,6 +481,8 @@ class MainWindow(CatalogMixin, ImportFlowMixin, PlaylistOpsMixin, UpdatesMixin, 
 
         splitter.addWidget(right_panel)
         splitter.setSizes([350, 850])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
 
