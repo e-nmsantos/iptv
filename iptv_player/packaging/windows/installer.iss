@@ -22,6 +22,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern
+SetupIconFile=app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoDescription={#MyAppName} Installer

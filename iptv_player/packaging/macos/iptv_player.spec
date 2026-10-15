@@ -15,7 +15,7 @@ a = Analysis(
     [os.path.join(PROJECT_ROOT, "main.py")],
     pathex=[PROJECT_ROOT],
     binaries=[],
-    datas=[],
+    datas=[(os.path.join(PROJECT_ROOT, "src", "ui", "assets"), os.path.join("src", "ui", "assets"))],
     hiddenimports=[
         # Core media player
         "vlc",

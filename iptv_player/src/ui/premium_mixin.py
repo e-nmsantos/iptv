@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from ..core.channel import Channel
 from ..core.content_types import LIVE, SERIES, VOD, content_type_for_stream
 from ..player.pvr_recorder import PvrRecorderManager
+from .icons import icon
 from .video_osd import VideoOsd
 
 STALKER_EPISODE_SCHEME = "stalker-episode://"
@@ -110,7 +111,7 @@ class PremiumMixin:
         backspace.setContext(Qt.ShortcutContext.WindowShortcut)
         backspace.activated.connect(self._recall_previous_channel)
 
-        self._action_home = QAction("🏠 Início", self)
+        self._action_home = QAction(icon("home"), "Início", self)
         self._action_home.setShortcut(QKeySequence("Ctrl+H"))
         self._action_home.triggered.connect(self._show_home_page)
         first = self._toolbar.actions()[0] if self._toolbar.actions() else None

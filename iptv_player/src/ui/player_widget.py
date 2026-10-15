@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..player.media_player import MediaPlayer
 from ..utils.helpers import format_duration
+from .icons import ICON_SIZE, icon
 from .pip_window import PiPWindow
 from .theme import Palette
 
@@ -113,8 +114,11 @@ class PlayerWidget(QWidget):
 
         # Controls overlay
         controls_container = QWidget()
+        controls_container.setObjectName("playerControls")
+        # Scoped by object name: a bare "QWidget" selector would cascade the
+        # top border onto every child label and slider in the bar.
         controls_container.setStyleSheet(f"""
-            QWidget {{
+            QWidget#playerControls {{
                 background: rgba(14, 14, 16, 225);
                 border-top: 1px solid {Palette.BORDER_STRONG};
             }}
@@ -136,28 +140,28 @@ class PlayerWidget(QWidget):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
 
-        self._play_btn = self._make_button("▶", "Play/Pause")
+        self._play_btn = self._make_button("play", "Reproduzir / pausar (Ctrl+Espaço)")
         self._play_btn.clicked.connect(self._toggle_play)
         btn_layout.addWidget(self._play_btn)
 
-        self._stop_btn = self._make_button("⏹", "Stop")
+        self._stop_btn = self._make_button("stop", "Parar")
         self._stop_btn.clicked.connect(self._stop)
         btn_layout.addWidget(self._stop_btn)
 
-        self._previous_channel_btn = self._make_button("⏮", "Canal anterior (Page Up)")
+        self._previous_channel_btn = self._make_button("previous", "Canal anterior (Page Up)")
         self._previous_channel_btn.clicked.connect(self.previous_channel_requested.emit)
         btn_layout.addWidget(self._previous_channel_btn)
 
-        self._next_channel_btn = self._make_button("⏭", "Canal seguinte (Page Down)")
+        self._next_channel_btn = self._make_button("next", "Canal seguinte (Page Down)")
         self._next_channel_btn.clicked.connect(self.next_channel_requested.emit)
         btn_layout.addWidget(self._next_channel_btn)
 
-        self._skip_back_btn = self._make_button("⏪", "Recuar 10 segundos")
+        self._skip_back_btn = self._make_button("rewind", "Recuar 10 segundos")
         self._skip_back_btn.clicked.connect(self._skip_backward)
         self._skip_back_btn.hide()
         btn_layout.addWidget(self._skip_back_btn)
 
-        self._skip_forward_btn = self._make_button("⏩", "Avançar 10 segundos")
+        self._skip_forward_btn = self._make_button("forward", "Avançar 10 segundos")
         self._skip_forward_btn.clicked.connect(self._skip_forward)
         self._skip_forward_btn.hide()
         btn_layout.addWidget(self._skip_forward_btn)
@@ -187,8 +191,8 @@ class PlayerWidget(QWidget):
         btn_layout.addStretch()
 
         # Volume
-        vol_label = QLabel("🔊")
-        vol_label.setStyleSheet(f"color: {Palette.TEXT_SECONDARY}; font-size: 14px;")
+        vol_label = QLabel()
+        vol_label.setPixmap(icon("volume", Palette.TEXT_SECONDARY).pixmap(ICON_SIZE))
         btn_layout.addWidget(vol_label)
 
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
@@ -198,17 +202,17 @@ class PlayerWidget(QWidget):
         self._volume_slider.valueChanged.connect(self._on_volume_change)
         btn_layout.addWidget(self._volume_slider)
 
-        self._audio_btn = self._make_button("A", "Faixa de áudio")
+        self._audio_btn = self._make_button("audio", "Faixa de áudio")
         self._audio_btn.clicked.connect(self._show_audio_menu)
         btn_layout.addWidget(self._audio_btn)
 
-        self._subtitle_btn = self._make_button("CC", "Legendas")
+        self._subtitle_btn = self._make_button("subtitles", "Legendas")
         self._subtitle_btn.clicked.connect(self._show_subtitle_menu)
         btn_layout.addWidget(self._subtitle_btn)
 
         # Recording/overlay/PiP are secondary controls tucked behind one
         # button so the row stays compact at the window's minimum width.
-        self._more_btn = self._make_button("⋯", "Mais opções")
+        self._more_btn = self._make_button("more", "Mais opções (gravar, estatísticas, picture-in-picture)")
         self._more_btn.clicked.connect(self._show_more_menu)
         btn_layout.addWidget(self._more_btn)
 
@@ -228,7 +232,7 @@ class PlayerWidget(QWidget):
         self._pip_action.toggled.connect(self._toggle_pip)
 
         # Fullscreen button
-        self._fullscreen_btn = self._make_button("⛶", "Fullscreen")
+        self._fullscreen_btn = self._make_button("fullscreen", "Ecrã inteiro (F11)")
         self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
         btn_layout.addWidget(self._fullscreen_btn)
 
@@ -309,9 +313,11 @@ class PlayerWidget(QWidget):
         controls_container.setMaximumHeight(135)
         layout.addWidget(controls_container)
 
-    def _make_button(self, text: str, tooltip: str) -> QPushButton:
-        """Create a styled control button."""
-        btn = QPushButton(text)
+    def _make_button(self, icon_name: str, tooltip: str) -> QPushButton:
+        """Create a styled icon-only control button."""
+        btn = QPushButton()
+        btn.setIcon(icon(icon_name, Palette.TEXT_SECONDARY, Palette.TEXT_PRIMARY))
+        btn.setIconSize(ICON_SIZE)
         btn.setToolTip(tooltip)
         btn.setFixedSize(36, 32)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -416,6 +422,9 @@ class PlayerWidget(QWidget):
             self._go_live_btn.hide()
             self._live_label_timer.stop()
 
+    def _set_play_icon(self, playing: bool) -> None:
+        self._play_btn.setIcon(icon("pause" if playing else "play", Palette.TEXT_PRIMARY))
+
     def set_next_episode(self, title: Optional[str]) -> None:
         """Show the "Próximo episódio" button when an episode follows the current one."""
         self._next_episode_btn.setVisible(bool(title))
@@ -426,7 +435,7 @@ class PlayerWidget(QWidget):
         """Stop playback."""
         self.clear_error_banner()
         self._media_player.stop()
-        self._play_btn.setText("▶")
+        self._set_play_icon(False)
         self._channel_info.setText("Parado")
 
     @Slot()
@@ -600,14 +609,14 @@ class PlayerWidget(QWidget):
         """Update UI based on player state."""
         if state == "playing":
             self.clear_error_banner()
-            self._play_btn.setText("⏸")
+            self._set_play_icon(True)
             if self._channel_name:
                 self._channel_info.setText(f"A reproduzir: {self._channel_name}")
             self._channel_info.setStyleSheet(
                 f"color: {Palette.TEXT_MUTED}; font-size: 11px; padding: 2px 10px;"
             )
         elif state in ("paused", "stopped"):
-            self._play_btn.setText("▶")
+            self._set_play_icon(False)
         elif state == "buffering":
             self._channel_info.setText("A estabilizar a transmissão…")
         elif state == "reconnecting":
@@ -620,7 +629,7 @@ class PlayerWidget(QWidget):
     def _on_error(self, message: str):
         """Handle player errors."""
         self._channel_info.setText(f"⚠ Erro: {message}")
-        self._play_btn.setText("▶")
+        self._set_play_icon(False)
         self.show_error_banner(message, is_live=self._stream_type == "live")
 
     @Slot()
@@ -651,7 +660,10 @@ class PlayerWidget(QWidget):
     @Slot(bool, str)
     def _on_recording_state_changed(self, is_recording: bool, path: str):
         self._record_action.setChecked(is_recording)
-        self._more_btn.setText("⏺" if is_recording else "⋯")
+        self._more_btn.setIcon(
+            icon("record", Palette.LIVE_BADGE) if is_recording
+            else icon("more", Palette.TEXT_SECONDARY, Palette.TEXT_PRIMARY)
+        )
         self._record_action.setToolTip(f"A gravar para: {path}" if is_recording else "Gravar canal")
 
     @Slot(bool)

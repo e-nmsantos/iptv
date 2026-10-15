@@ -3,7 +3,7 @@
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, Slot
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
@@ -45,6 +45,7 @@ from .epg_grid_widget import EPGGridWidget
 from .epg_widget import EPGWidget
 from .global_search import GlobalSearchDialog
 from .home_view import HomeView
+from .icons import app_icon, icon
 from .import_flow_mixin import ImportFlowMixin
 from .pill_tabs import PillTabBar
 from .playback import PlaybackMixin
@@ -77,7 +78,7 @@ class MainWindow(
         super().__init__()
         self.setWindowTitle("IPTV Player")
         self.setMinimumSize(980, 600)
-        self.setWindowIcon(QIcon())
+        self.setWindowIcon(app_icon())
 
         # Core components
         self._settings = Settings()
@@ -365,8 +366,14 @@ class MainWindow(
             }}
             QToolButton:pressed {{ background: {Palette.ACCENT}; }}
         """)
+        self._action_refresh_epg.setIcon(icon("guide"))
+        self._action_refresh_catalog.setIcon(icon("refresh"))
+        self._action_global_search.setIcon(icon("search"))
+        self._action_settings.setIcon(icon("settings"))
         add_playlist_btn = QToolButton(self._toolbar)
-        add_playlist_btn.setText("➕ Adicionar lista")
+        add_playlist_btn.setIcon(icon("plus"))
+        add_playlist_btn.setText("Adicionar lista")
+        add_playlist_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         add_playlist_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         add_menu = QMenu(self)
         add_menu.addAction(self._action_import_m3u)
@@ -461,11 +468,11 @@ class MainWindow(
         self._bottom_tabs = QTabWidget()
 
         self._epg_widget = EPGWidget()
-        self._bottom_tabs.addTab(self._epg_widget, "📺 Programa do canal")
+        self._bottom_tabs.addTab(self._epg_widget, icon("live", Palette.TEXT_SECONDARY), "Programa do canal")
 
         self._epg_grid_widget = EPGGridWidget()
         self._epg_grid_widget.set_programs_provider(self._epg_programs_for_channel)
-        self._bottom_tabs.addTab(self._epg_grid_widget, "🗓 Guia completo")
+        self._bottom_tabs.addTab(self._epg_grid_widget, icon("guide", Palette.TEXT_SECONDARY), "Guia completo")
 
         empty_tab = QWidget()
         info_layout = QVBoxLayout(empty_tab)
@@ -476,7 +483,7 @@ class MainWindow(
         self._history_list = QListWidget()
         self._history_list.setAlternatingRowColors(True)
         info_layout.addWidget(self._history_list)
-        self._bottom_tabs.addTab(empty_tab, "🕒 Recentes")
+        self._bottom_tabs.addTab(empty_tab, icon("clock", Palette.TEXT_SECONDARY), "Recentes")
 
         resume_tab = QWidget()
         resume_layout = QVBoxLayout(resume_tab)
@@ -488,7 +495,7 @@ class MainWindow(
         self._resume_list.setAlternatingRowColors(True)
         self._resume_list.itemDoubleClicked.connect(self._on_resume_item_activated)
         resume_layout.addWidget(self._resume_list)
-        self._bottom_tabs.addTab(resume_tab, "▶ Continuar a ver")
+        self._bottom_tabs.addTab(resume_tab, icon("play", Palette.TEXT_SECONDARY), "Continuar a ver")
 
         right_layout.addWidget(self._bottom_tabs, 1)
 

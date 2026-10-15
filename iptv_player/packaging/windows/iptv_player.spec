@@ -8,7 +8,7 @@ analysis = Analysis(
     [os.path.join(project_root, "main.py")],
     pathex=[project_root],
     binaries=[],
-    datas=[],
+    datas=[(os.path.join(project_root, "src", "ui", "assets"), os.path.join("src", "ui", "assets"))],
     hiddenimports=[
         "vlc",
         "Crypto.Cipher.AES",
@@ -18,6 +18,7 @@ analysis = Analysis(
         "PySide6.QtCore",
         "PySide6.QtWidgets",
         "PySide6.QtGui",
+        "PySide6.QtSvg",
         "src.core.channel_cleaner",
         "src.core.metadata_enricher",
         "src.core.server_speedtest",
@@ -51,6 +52,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon=os.path.join(project_root, "packaging", "windows", "app.ico"),
 )
 collection = COLLECT(
     exe,

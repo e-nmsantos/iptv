@@ -53,7 +53,8 @@ class Palette:
     CARD_GRADIENT_BOTTOM = "rgba(0, 0, 0, 210)"
     HERO_GRADIENT = "rgba(14, 14, 16, 235)"
 
-    FONT_FAMILY = "'Segoe UI', 'Inter', sans-serif"
+    # Windows 11's variable UI font first, then the classic Windows, macOS and Linux faces.
+    FONT_FAMILY = "'Segoe UI Variable Text', 'Segoe UI', 'SF Pro Text', 'Inter', 'Cantarell', sans-serif"
 
 
 def build_stylesheet() -> str:
@@ -119,6 +120,52 @@ def build_stylesheet() -> str:
     }}
     QPushButton#primaryButton:hover {{
         background: {p.ACCENT_HOVER};
+    }}
+
+    QPushButton#heroButton {{
+        background: {p.TEXT_PRIMARY};
+        color: {p.BG_BASE};
+        border: none;
+        border-radius: 10px;
+        padding: 11px 24px;
+        font-size: 14px;
+        font-weight: 800;
+    }}
+    QPushButton#heroButton:hover {{
+        background: #ffffff;
+    }}
+    QPushButton#pillButton {{
+        background: {p.ACCENT_MUTED};
+        color: {p.TEXT_PRIMARY};
+        border: 1px solid {p.ACCENT};
+        border-radius: 13px;
+        padding: 4px 12px;
+        font-size: 11px;
+        font-weight: 700;
+    }}
+    QPushButton#pillButton:hover {{
+        background: {p.ACCENT};
+    }}
+    QPushButton#linkButton {{
+        background: transparent;
+        border: none;
+        color: {p.ACCENT_HOVER};
+        font-weight: 700;
+        padding: 4px 8px;
+    }}
+    QPushButton#linkButton:hover {{
+        color: {p.TEXT_PRIMARY};
+    }}
+
+    QFrame#nowPlayingBar {{
+        background: {p.BG_ELEVATED};
+        border: 1px solid {p.BORDER_STRONG};
+        border-left: 3px solid {p.ACCENT};
+        border-radius: {p.RADIUS_MD}px;
+    }}
+    QScrollArea#homeScroll, QScrollArea#homeRowScroll {{
+        background: transparent;
+        border: none;
     }}
 
     QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
