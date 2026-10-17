@@ -12,10 +12,18 @@ import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * [pin] lets the desktop app sync with this TV after finding it on the network (mDNS):
+ * `GET /sync/<pin>` returns the TV's credential-free state, `POST /sync/<pin>` merges the
+ * desktop's. Five wrong PINs end the session, so the 6 digits can't be brute-forced.
+ */
 data class PairingSession(
     val url: String,
     val expiresAtMillis: Long,
+    val pin: String = "",
+    val port: Int = 0,
 )
 
 enum class PairingSourceType { M3U, XTREAM, STALKER, SYNC }
@@ -40,7 +48,9 @@ class PairingServer(
     }
     private val closed = AtomicBoolean(false)
     private val consumed = AtomicBoolean(false)
+    private val failedPins = AtomicInteger(0)
     private var serverSocket: ServerSocket? = null
+    private var syncPath = ""
 
     fun start(onPayloadReceived: (PairingPayload) -> Unit, onExpired: () -> Unit = {}): PairingSession {
         check(serverSocket == null) { "O emparelhamento já está ativo." }
@@ -57,9 +67,11 @@ class PairingServer(
             advertisedAddress.hostAddress
         }
         val path = "/pair/$token"
+        val pin = (SecureRandom().nextInt(900_000) + 100_000).toString()
+        syncPath = "/sync/$pin"
         executor.execute {
             try {
-                while (!closed.get() && !consumed.get() && now() < expiresAt) {
+                while (!closed.get() && !consumed.get() && failedPins.get() < MAX_PIN_ATTEMPTS && now() < expiresAt) {
                     try {
                         socket.accept().use { client -> handle(client, path, onPayloadReceived) }
                     } catch (_: SocketTimeoutException) {
@@ -71,7 +83,7 @@ class PairingServer(
                 close()
             }
         }
-        return PairingSession("http://$host:${socket.localPort}$path", expiresAt)
+        return PairingSession("http://$host:${socket.localPort}$path", expiresAt, pin, socket.localPort)
     }
 
     private fun handle(socket: Socket, path: String, onPayloadReceived: (PairingPayload) -> Unit) {
@@ -79,6 +91,7 @@ class PairingServer(
         val input = BufferedInputStream(socket.getInputStream())
         val output = BufferedOutputStream(socket.getOutputStream())
         val request = readRequest(input) ?: return respond(output, 400, "Pedido inválido.", "text/plain; charset=utf-8")
+        if (request.path.startsWith("/sync/")) return handleDesktopSync(request, output, onPayloadReceived)
         if (request.path != path) return respond(output, 404, "Não encontrado.", "text/plain; charset=utf-8")
         when (request.method) {
             "GET" -> respond(output, 200, page(path), "text/html; charset=utf-8")
@@ -97,6 +110,33 @@ class PairingServer(
                 onPayloadReceived(payload)
             }
             else -> respond(output, 405, "Método não permitido.", "text/plain; charset=utf-8", "Allow: GET, POST\r\n")
+        }
+    }
+
+    private fun handleDesktopSync(
+        request: Request,
+        output: BufferedOutputStream,
+        onPayloadReceived: (PairingPayload) -> Unit,
+    ) {
+        val json = "application/json; charset=utf-8"
+        if (request.path != syncPath) {
+            failedPins.incrementAndGet()
+            return respond(output, 403, """{"error":"PIN incorreto"}""", json)
+        }
+        when (request.method) {
+            "GET" -> respond(output, 200, exportData.ifBlank { """{"schema_version":1,"favorites":[],"progress":{}}""" }, json)
+            "POST" -> {
+                val payload = validatePayload(parseForm(request.body))
+                if (payload == null || payload.type != PairingSourceType.SYNC) {
+                    return respond(output, 400, """{"error":"Dados de sincronização inválidos"}""", json)
+                }
+                if (!consumed.compareAndSet(false, true)) {
+                    return respond(output, 409, """{"error":"Código já utilizado"}""", json)
+                }
+                respond(output, 200, """{"ok":true}""", json)
+                onPayloadReceived(payload)
+            }
+            else -> respond(output, 405, """{"error":"Método não permitido"}""", json, "Allow: GET, POST\r\n")
         }
     }
 
@@ -198,6 +238,7 @@ class PairingServer(
         val reason = when (status) {
             200 -> "OK"
             400 -> "Bad Request"
+            403 -> "Forbidden"
             404 -> "Not Found"
             405 -> "Method Not Allowed"
             409 -> "Conflict"
@@ -219,7 +260,7 @@ class PairingServer(
 
     private fun page(path: String): String = """<!doctype html>
         <html lang="pt"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>IPTV Player TV</title><style>body{font-family:system-ui;background:#07111f;color:#fff;margin:0;padding:20px}main{max-width:620px;margin:auto}section{background:#10243a;padding:22px;border-radius:18px;margin:14px 0}label{display:block;margin:13px 0 7px}input,textarea,button{box-sizing:border-box;width:100%;padding:14px;border:0;border-radius:10px;font-size:16px}textarea{min-height:120px}button{margin-top:14px;background:#41d3bd;color:#07111f;font-weight:700}.note{color:#a6b4c4;font-size:14px;line-height:1.45}h2{margin-top:0}</style></head>
+        <title>IPTV Player TV</title><style>body{font-family:system-ui;background:#0e0e10;color:#fff;margin:0;padding:20px}main{max-width:620px;margin:auto}section{background:#1c1c1f;padding:22px;border-radius:18px;margin:14px 0}label{display:block;margin:13px 0 7px}input,textarea,button{box-sizing:border-box;width:100%;padding:14px;border:0;border-radius:10px;font-size:16px}textarea{min-height:120px}button{margin-top:14px;background:#e8455a;color:#fff;font-weight:700}.note{color:#a8a8ad;font-size:14px;line-height:1.45}h2{margin-top:0}</style></head>
         <body><main><h1>Enviar ligação para a TV</h1><p class="note">Escolhe o tipo fornecido pelo teu serviço. A ligação é direta para a televisão, usa HTTP local e deve ser usada apenas numa rede doméstica de confiança. Outros dispositivos na rede podem intercetar os dados.</p>
         <section><h2>M3U / M3U8</h2><form method="post" action="$path"><input type="hidden" name="source_type" value="m3u"><label>Endereço da lista</label><input name="url" type="url" maxlength="4096" required placeholder="https://servidor/lista.m3u"><button type="submit">Enviar M3U</button></form></section>
         <section><h2>Xtream Codes</h2><form method="post" action="$path"><input type="hidden" name="source_type" value="xtream"><label>Servidor</label><input name="url" maxlength="4096" required placeholder="http://servidor:porta"><label>Utilizador</label><input name="username" maxlength="256" required autocomplete="username"><label>Palavra-passe</label><input name="password" type="password" maxlength="512" required autocomplete="current-password"><button type="submit">Enviar Xtream</button></form></section>
@@ -230,7 +271,7 @@ class PairingServer(
 
     private fun resultPage(title: String, message: String): String = """<!doctype html>
         <html lang="pt"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>$title</title>
-        <style>body{font-family:system-ui;background:#07111f;color:#fff;padding:28px}main{max-width:560px;margin:auto;background:#10243a;padding:24px;border-radius:18px}p{color:#a6b4c4}</style></head><body><main><h1>$title</h1><p>$message</p></main></body></html>"""
+        <style>body{font-family:system-ui;background:#0e0e10;color:#fff;padding:28px}main{max-width:560px;margin:auto;background:#1c1c1f;padding:24px;border-radius:18px}p{color:#a8a8ad}</style></head><body><main><h1>$title</h1><p>$message</p></main></body></html>"""
 
     private fun htmlEscape(value: String): String = value
         .replace("&", "&amp;")
@@ -249,5 +290,6 @@ class PairingServer(
         private const val MAX_HEADER_BYTES = 16 * 1024
         private const val MAX_BODY_BYTES = 512 * 1024
         private const val MAX_SYNC_CHARS = 150 * 1024
+        private const val MAX_PIN_ATTEMPTS = 5
     }
 }

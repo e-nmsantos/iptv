@@ -452,6 +452,7 @@ private fun CatalogScreen(
             url = state.pairingUrl,
             expiresAtMillis = state.pairingExpiresAtMillis,
             message = state.pairingMessage,
+            pin = state.pairingPin,
             onNewCode = onStartPairing,
             onDismiss = {
                 showPairing = false
@@ -1106,7 +1107,7 @@ private fun AddPlaylistScreen(
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             AddSourceCard(
-                "▦", "Telemóvel por QR", "A forma mais simples: introduz os dados no telemóvel.", !busy, onPhone,
+                "▦", "Telemóvel ou computador", "QR code para o telemóvel, ou PIN para sincronizar com o PC.", !busy, onPhone,
                 if (focusRequester != null) Modifier.weight(1f).focusRequester(focusRequester) else Modifier.weight(1f),
             )
             AddSourceCard("XC", "Xtream Codes", "Servidor, utilizador e palavra-passe.", !busy, onXtream, Modifier.weight(1f))

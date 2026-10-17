@@ -11,6 +11,8 @@ data class PairingStatus(
     val url: String? = null,
     val expiresAtMillis: Long = 0,
     val message: String? = null,
+    /** PIN the desktop app asks for when it syncs with this TV over the network. */
+    val pin: String? = null,
 )
 
 /** Owns pairing lifecycle so catalogue state does not manage sockets directly. */
@@ -19,6 +21,8 @@ class PairingCoordinator(
     private val scope: CoroutineScope,
 ) : AutoCloseable {
     private val addressResolver = NetworkAddressResolver(context.applicationContext)
+    // Advertises only the port; the desktop still needs the PIN shown on screen.
+    private val discovery = NsdPairingDiscovery(context.applicationContext)
     private var job: Job? = null
     @Volatile private var server: PairingServer? = null
 
@@ -51,7 +55,8 @@ class PairingCoordinator(
                     return@runCatching
                 }
                 server = candidate
-                onStatus(PairingStatus(session.url, session.expiresAtMillis))
+                discovery.registerService(session.port, android.os.Build.MODEL.ifBlank { "IPTV Player TV" })
+                onStatus(PairingStatus(session.url, session.expiresAtMillis, pin = session.pin))
             }.onFailure {
                 candidate.close()
                 onError(it)
@@ -60,6 +65,7 @@ class PairingCoordinator(
     }
 
     fun stop() {
+        discovery.unregisterService()
         job?.cancel()
         job = null
         server?.close()

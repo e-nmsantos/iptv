@@ -91,4 +91,55 @@ class PairingServerTest {
             server.close()
         }
     }
+
+    @Test
+    fun `desktop syncs with the pin and wrong pins end the session`() {
+        val state = """{"schema_version":1,"favorites":["media:tv"],"progress":{}}"""
+        val received = mutableListOf<PairingPayload>()
+        val latch = CountDownLatch(1)
+        val server = PairingServer(InetAddress.getLoopbackAddress(), exportData = state)
+        try {
+            val session = server.start(onPayloadReceived = { received += it; latch.countDown() })
+            assertEquals(6, session.pin.length)
+            val base = "http://127.0.0.1:${session.port}/sync/"
+
+            val get = URL(base + session.pin).openConnection() as HttpURLConnection
+            assertEquals(200, get.responseCode)
+            assertEquals(state, get.inputStream.bufferedReader().readText())
+
+            val sync = """{"schema_version":1,"favorites":["media:pc"],"progress":{}}"""
+            val post = URL(base + session.pin).openConnection() as HttpURLConnection
+            post.requestMethod = "POST"
+            post.doOutput = true
+            post.outputStream.use {
+                it.write(("source_type=sync&sync_data=" + URLEncoder.encode(sync, StandardCharsets.UTF_8.name())).toByteArray())
+            }
+            assertEquals(200, post.responseCode)
+            assertTrue(latch.await(2, TimeUnit.SECONDS))
+            assertEquals(sync, received.single().syncData)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun `five wrong pins close the pairing session`() {
+        val server = PairingServer(InetAddress.getLoopbackAddress())
+        try {
+            val session = server.start(onPayloadReceived = {})
+            val wrong = if (session.pin == "111111") "222222" else "111111"
+            repeat(5) {
+                val get = URL("http://127.0.0.1:${session.port}/sync/$wrong").openConnection() as HttpURLConnection
+                assertEquals(403, get.responseCode)
+            }
+            Thread.sleep(1_500)
+            val after = runCatching {
+                (URL("http://127.0.0.1:${session.port}/sync/${session.pin}").openConnection() as HttpURLConnection)
+                    .apply { connectTimeout = 1_000; readTimeout = 1_000 }.responseCode
+            }.getOrNull()
+            assertTrue("session should be closed, got $after", after == null)
+        } finally {
+            server.close()
+        }
+    }
 }

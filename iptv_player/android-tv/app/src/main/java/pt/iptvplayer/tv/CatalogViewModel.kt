@@ -243,6 +243,7 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                             pairingUrl = status.url,
                             pairingExpiresAtMillis = status.expiresAtMillis,
                             pairingMessage = status.message,
+                            pairingPin = status.pin,
                             error = null,
                         )
                     }
@@ -321,7 +322,7 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
         pairing.stop()
         playbackJob?.cancel()
         mutableState.update {
-            it.copy(pairingUrl = null, pairingExpiresAtMillis = 0, pairingMessage = null)
+            it.copy(pairingUrl = null, pairingExpiresAtMillis = 0, pairingMessage = null, pairingPin = null)
         }
     }
 

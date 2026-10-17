@@ -227,6 +227,9 @@ class MainWindow(
             "Importar favoritos e retoma da TV...", self
         )
         self._action_import_device_sync.triggered.connect(self._import_device_sync)
+        self._action_sync_tv = QAction("Sincronizar com a TV...", self)
+        self._action_sync_tv.setToolTip("Favoritos e pontos de retoma nos dois sentidos, pela rede local")
+        self._action_sync_tv.triggered.connect(self._sync_with_tv)
 
         self._action_global_search = QAction(
             style.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView),
@@ -247,6 +250,7 @@ class MainWindow(
         playlist_menu.addAction(rename_playlist_action)
         playlist_menu.addAction(self._action_refresh_catalog)
         playlist_menu.addSeparator()
+        playlist_menu.addAction(self._action_sync_tv)
         playlist_menu.addAction(self._action_copy_device_sync)
         playlist_menu.addAction(self._action_import_device_sync)
 

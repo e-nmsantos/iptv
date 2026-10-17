@@ -19,6 +19,7 @@ data class CatalogUiState(
     val pairingUrl: String? = null,
     val pairingExpiresAtMillis: Long = 0,
     val pairingMessage: String? = null,
+    val pairingPin: String? = null,
     val seriesTitle: String? = null,
     val seriesEpisodes: List<Channel> = emptyList(),
     val seriesLoading: Boolean = false,

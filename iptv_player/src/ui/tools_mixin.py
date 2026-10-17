@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLineEdit
 
 from ..core.backup import create_backup, read_backup
 from ..core.device_sync import export_device_state, import_device_state
+from ..core.tv_sync import TvEndpoint, discover_tvs, exchange_with_tv
 
 
 class ToolsMixin:
@@ -66,6 +67,89 @@ class ToolsMixin:
             "Sincronizar TV",
             f"Importados {result['favorites']} favoritos e "
             f"{result['progress']} pontos de retoma.",
+        )
+
+    @Slot()
+    def _sync_with_tv(self):
+        """Two-way favourites/resume sync with a TV on the home network (PIN based)."""
+        playlist_id = self._current_playlist_id
+        if not playlist_id:
+            QMessageBox.information(self, "Sincronizar com a TV", "Seleciona primeiro uma playlist.")
+            return
+
+        def discover():
+            try:
+                return discover_tvs()
+            except ImportError:
+                return []
+
+        self._run_background(
+            discover,
+            lambda tvs: self._ask_tv_and_pin(playlist_id, tvs),
+            on_error=lambda _message: self._ask_tv_and_pin(playlist_id, []),
+            status_message="A procurar televisões na rede...",
+            use_semaphore=False,
+        )
+
+    def _ask_tv_and_pin(self, playlist_id: int, tvs: list) -> None:
+        instructions = (
+            "Na TV abre Adicionar → Telemóvel ou computador: aparecem o PIN e o endereço."
+        )
+        endpoint = None
+        if tvs:
+            labels = [tv.label for tv in tvs] + ["Outra (escrever endereço)..."]
+            choice, accepted = QInputDialog.getItem(
+                self, "Sincronizar com a TV", "Televisões encontradas na rede:", labels, 0, False
+            )
+            if not accepted:
+                return
+            if choice in labels[:-1]:
+                endpoint = tvs[labels.index(choice)]
+        if endpoint is None:
+            address, accepted = QInputDialog.getText(
+                self, "Sincronizar com a TV",
+                f"{instructions}\n\nEndereço mostrado na TV (por exemplo 192.168.1.20:41234):",
+            )
+            if not accepted or not address.strip():
+                return
+            host, _, port = address.strip().removeprefix("http://").split("/")[0].partition(":")
+            if not port.isdigit():
+                QMessageBox.warning(self, "Sincronizar com a TV", "Indica o endereço com a porta, como aparece na TV.")
+                return
+            endpoint = TvEndpoint("TV", host, int(port))
+        pin, accepted = QInputDialog.getText(
+            self, "Sincronizar com a TV", f"PIN de 6 algarismos mostrado em {endpoint.label}:",
+        )
+        if not accepted or not pin.strip():
+            return
+
+        merged = {}
+
+        def merge_tv_then_export(tv_state: str) -> str:
+            merged.update(import_device_state(self._db, playlist_id, tv_state))
+            return export_device_state(self._db, playlist_id)
+
+        def run():
+            exchange_with_tv(endpoint, pin, merge_tv_then_export)
+            return merged
+
+        def done(result):
+            self._distribute_channels(self._db.get_channels(playlist_id))
+            self._refresh_resume()
+            QMessageBox.information(
+                self,
+                "Sincronizar com a TV",
+                f"Sincronização concluída com {endpoint.label}.\n"
+                f"Recebidos da TV: {result.get('favorites', 0)} favoritos e "
+                f"{result.get('progress', 0)} pontos de retoma.\n"
+                "Os favoritos e pontos de retoma deste computador foram enviados para a TV.",
+            )
+
+        self._run_background(
+            run, done,
+            on_error=lambda message: QMessageBox.warning(self, "Sincronizar com a TV", message),
+            status_message=f"A sincronizar com {endpoint.label}...",
+            context_playlist_id=playlist_id,
         )
 
     @Slot()

@@ -288,6 +288,7 @@ internal fun PairingDialog(
     url: String?,
     expiresAtMillis: Long,
     message: String?,
+    pin: String? = null,
     onNewCode: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -300,7 +301,7 @@ internal fun PairingDialog(
     }
     Dialog(onDismissRequest = onDismiss) {
         DialogPanel {
-            Text("Enviar pelo telemóvel", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+            Text("Telemóvel ou computador", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             when {
                 url != null -> {
@@ -319,6 +320,21 @@ internal fun PairingDialog(
                     Spacer(Modifier.height(10.dp))
                     Text("Válido durante ${secondsLeft / 60}:${(secondsLeft % 60).toString().padStart(2, '0')}", color = Accent)
                     Text("Usa uma rede doméstica de confiança.", color = Muted, fontSize = 13.sp)
+                    if (pin != null) {
+                        Spacer(Modifier.height(14.dp))
+                        Text("No computador: Playlists → Sincronizar com a TV", color = Muted, fontSize = 13.sp)
+                        Text(
+                            "PIN  ${pin.chunked(3).joinToString(" ")}",
+                            color = Color.White,
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            "Endereço: " + url.removePrefix("http://").substringBefore('/'),
+                            color = Muted,
+                            fontSize = 13.sp,
+                        )
+                    }
                 }
                 message != null -> {
                     Text(message, color = if (message.contains("sucesso")) Accent else Muted, fontSize = 18.sp)

@@ -131,3 +131,57 @@ class EpisodeHelperTests(unittest.TestCase):
         replay = Channel("Ep 2", "https://other-host/2", source="xtream", xtream_id="2", stream_type="series")
         self.assertEqual(episode_index(episodes, replay), 1)
         self.assertEqual(episode_index(episodes, Channel("Nope", "https://x", source="xtream", xtream_id="9")), -1)
+
+
+class TvSyncTests(unittest.TestCase):
+    """Exercises the desktop client against a stand-in for the TV's /sync/<pin> endpoint."""
+
+    def _serve(self, handler_cls):
+        import threading
+        from http.server import HTTPServer
+
+        server = HTTPServer(("127.0.0.1", 0), handler_cls)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def test_exchange_fetches_tv_state_then_posts_merged_desktop_state(self):
+        from http.server import BaseHTTPRequestHandler
+        from urllib.parse import parse_qs
+
+        from src.core.tv_sync import TvEndpoint, exchange_with_tv
+
+        posted = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                code = 200 if self.path == "/sync/123456" else 403
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(b'{"schema_version":1,"favorites":["media:tv"],"progress":{}}')
+
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                posted.update(parse_qs(self.rfile.read(length).decode()))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+        port = self._serve(Handler)
+        endpoint = TvEndpoint("Sala", "127.0.0.1", port)
+        seen = []
+        tv_state = exchange_with_tv(endpoint, "123 456", lambda state: seen.append(state) or '{"pc":1}')
+        self.assertIn("media:tv", tv_state)
+        self.assertEqual(seen, [tv_state])
+        self.assertEqual(posted["source_type"], ["sync"])
+        self.assertEqual(posted["sync_data"], ['{"pc":1}'])
+
+        with self.assertRaisesRegex(ValueError, "PIN incorreto"):
+            exchange_with_tv(endpoint, "654321", lambda state: "{}")
+        with self.assertRaisesRegex(ValueError, "6 algarismos"):
+            exchange_with_tv(endpoint, "12", lambda state: "{}")
+        with self.assertRaisesRegex(ValueError, "rede local"):
+            exchange_with_tv(TvEndpoint("x", "8.8.8.8", 80), "123456", lambda state: "{}")
