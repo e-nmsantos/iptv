@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -48,6 +49,7 @@ internal fun DiagnosticsScreen(state: CatalogUiState) {
         DiagnosticRow("Eventos EPG carregados", epgCount.toString())
         DiagnosticRow("Favoritos", state.homeFavorites.size.toString())
         DiagnosticRow("A atualizar", if (state.loading) "Sim" else "Não")
+        DiagnosticRow("Descodificadores extra", remember { pt.iptvplayer.tv.playback.ffmpegCapabilities() })
     }
 }
 

@@ -84,7 +84,7 @@ internal fun ChannelGuide(
     }
     Row(modifier.background(PlayerPanel)) {
         Column(
-            Modifier.width(210.dp).fillMaxHeight().background(Color(0xFF071421)).padding(14.dp),
+            Modifier.width(210.dp).fillMaxHeight().background(TvColors.Sidebar).padding(14.dp),
         ) {
             Text("CATEGORIAS", color = PlayerAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             Text("Botão vermelho: adicionar/remover favorito", color = PlayerMuted, fontSize = 11.sp)
@@ -97,10 +97,10 @@ internal fun ChannelGuide(
                         Modifier.fillMaxWidth()
                             .onFocusChanged { focused = it.isFocused }
                             .background(
-                                when { focused -> PlayerFocused; selected -> Color(0xFF183B4D); else -> Color.Transparent },
+                                when { focused -> PlayerFocused; selected -> TvColors.Selected; else -> Color.Transparent },
                                 RoundedCornerShape(9.dp),
                             )
-                            .border(if (focused) 2.dp else 0.dp, PlayerAccent, RoundedCornerShape(9.dp))
+                            .border(if (focused) 2.dp else 0.dp, if (focused) PlayerAccent else Color.Transparent, RoundedCornerShape(9.dp))
                             .clickable { onSelectCategory(category) }.focusable()
                             .padding(horizontal = 12.dp, vertical = 13.dp),
                     ) {
@@ -141,15 +141,15 @@ internal fun ChannelGuide(
                             }
                             .onFocusChanged { focused = it.isFocused }
                             .background(
-                                when { focused -> PlayerFocused; selected -> Color(0xFF183B4D); else -> Color.Transparent },
+                                when { focused -> PlayerFocused; selected -> TvColors.Selected; else -> Color.Transparent },
                                 RoundedCornerShape(10.dp),
                             )
-                            .border(if (focused) 2.dp else 0.dp, PlayerAccent, RoundedCornerShape(10.dp))
+                            .border(if (focused) 2.dp else 0.dp, if (focused) PlayerAccent else Color.Transparent, RoundedCornerShape(10.dp))
                             .clickable { onSelect(item) }.focusable().padding(horizontal = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(
-                            Modifier.size(48.dp).background(Color(0xFF07111F), RoundedCornerShape(8.dp)),
+                            Modifier.size(48.dp).background(TvColors.Background, RoundedCornerShape(8.dp)),
                             contentAlignment = Alignment.Center,
                         ) {
                             if (item.logo.isNotBlank()) AsyncImage(

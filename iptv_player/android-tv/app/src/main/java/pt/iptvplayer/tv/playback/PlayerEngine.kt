@@ -134,7 +134,12 @@ class PlayerSession(val player: ExoPlayer, val stats: StreamStatsCollector, val 
  * where the viewer stopped instead of jumping to "now".
  */
 @OptIn(UnstableApi::class)
-fun buildPlayerSession(context: Context, channel: Channel, settings: PlayerSettings): PlayerSession {
+fun buildPlayerSession(
+    context: Context,
+    channel: Channel,
+    settings: PlayerSettings,
+    preferredAudioMime: String? = null,
+): PlayerSession {
     val bandwidthMeter = DefaultBandwidthMeter.Builder(context).build()
     val httpFactory = DefaultHttpDataSource.Factory()
         .setAllowCrossProtocolRedirects(true)
@@ -166,6 +171,7 @@ fun buildPlayerSession(context: Context, channel: Channel, settings: PlayerSetti
             },
         )
         .setEnableDecoderFallback(true)
+    logDecodersOnce
     val stats = StreamStatsCollector(bandwidthMeter)
     val player = ExoPlayer.Builder(context, renderersFactory)
         .setMediaSourceFactory(mediaSourceFactory)
@@ -174,6 +180,11 @@ fun buildPlayerSession(context: Context, channel: Channel, settings: PlayerSetti
         .build()
         .apply {
             addAnalyticsListener(stats)
+            if (preferredAudioMime != null) {
+                trackSelectionParameters = trackSelectionParameters.buildUpon()
+                    .setPreferredAudioMimeType(preferredAudioMime)
+                    .build()
+            }
             setWakeMode(C.WAKE_MODE_NETWORK)
             repeatMode = if (isLive) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
             setMediaItem(MediaItem.fromUri(channel.url))
@@ -185,3 +196,32 @@ fun buildPlayerSession(context: Context, channel: Channel, settings: PlayerSetti
 
 /** Upper bound for a paused live buffer; in practice the byte budget is reached first. */
 private const val TIMESHIFT_MAX_BUFFER_MS = 60 * 60 * 1000
+
+private val logDecodersOnce: Unit by lazy {
+    android.util.Log.i("PlayerEngine", "Decoders: ${ffmpegCapabilities()}")
+    Unit
+}
+
+/** True when the bundled FFmpeg build can decode [mimeType]. */
+@OptIn(UnstableApi::class)
+fun ffmpegSupports(mimeType: String?): Boolean = mimeType != null && runCatching {
+    io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary.isAvailable() &&
+        io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary.supportsFormat(mimeType)
+}.getOrDefault(false)
+
+/** Whether the bundled FFmpeg decoders loaded, and which problem codecs they cover. */
+@OptIn(UnstableApi::class)
+fun ffmpegCapabilities(): String = runCatching {
+    if (!io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary.isAvailable()) {
+        return@runCatching "Indisponível nesta box"
+    }
+    val codecs = listOf(
+        "AC-3" to androidx.media3.common.MimeTypes.AUDIO_AC3,
+        "E-AC-3" to androidx.media3.common.MimeTypes.AUDIO_E_AC3,
+        "DTS" to androidx.media3.common.MimeTypes.AUDIO_DTS,
+        "TrueHD" to androidx.media3.common.MimeTypes.AUDIO_TRUEHD,
+        "MP2" to androidx.media3.common.MimeTypes.AUDIO_MPEG_L2,
+    ).filter { (_, mime) -> io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary.supportsFormat(mime) }
+        .joinToString(", ") { it.first }
+    "FFmpeg ${io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary.getVersion()} · ${codecs.ifBlank { "sem codecs de áudio extra" }}"
+}.getOrElse { "Erro: ${it.message}" }

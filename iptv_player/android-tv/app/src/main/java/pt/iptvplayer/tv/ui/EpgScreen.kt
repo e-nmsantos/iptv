@@ -180,7 +180,7 @@ private fun GuideCategoryRail(categories: List<String>, selected: String, onSele
                     Modifier.fillMaxWidth()
                         .onFocusChanged { focused = it.isFocused }
                         .background(
-                            when { focused -> Accent; isSelected -> Color(0xFF183B4D); else -> Color.Transparent },
+                            when { focused -> Accent; isSelected -> TvColors.Selected; else -> Color.Transparent },
                             RoundedCornerShape(8.dp),
                         )
                         .clickable { onSelectCategory(category) }
@@ -256,7 +256,7 @@ private fun GuideChannelRow(
                             .background(
                                 when {
                                     focused -> Accent
-                                    airing -> Color(0xFF1F4A62)
+                                    airing -> TvColors.Airing
                                     else -> PanelFocused
                                 },
                                 RoundedCornerShape(7.dp),

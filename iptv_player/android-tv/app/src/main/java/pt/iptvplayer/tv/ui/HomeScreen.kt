@@ -234,7 +234,7 @@ private fun HeroBanner(
                 }
             }
             Box(
-                Modifier.width(170.dp).fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0A1624)),
+                Modifier.width(170.dp).fillMaxHeight().clip(RoundedCornerShape(14.dp)).background(TvColors.Placeholder),
             ) {
                 AsyncImage(model = artwork, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             }
@@ -324,11 +324,11 @@ private fun ContinueCard(
                 }
             }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(14.dp))
-            .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(14.dp))
+            .border(if (focused) 3.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(14.dp))
             .clickable { onResume(item) }
             .focusable(),
     ) {
-        Box(Modifier.fillMaxWidth().height(160.dp).clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)).background(Color(0xFF0A1624))) {
+        Box(Modifier.fillMaxWidth().height(160.dp).clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)).background(TvColors.Placeholder)) {
             if (item.artwork.isNotBlank()) {
                 AsyncImage(model = item.artwork, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             } else {
@@ -368,11 +368,11 @@ private fun LiveTile(channel: Channel, programmes: List<EpgProgram>?, onPlay: (C
             .graphicsLayer { scaleX = if (focused) 1.05f else 1f; scaleY = if (focused) 1.05f else 1f }
             .onFocusChanged { focused = it.isFocused }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(14.dp))
-            .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(14.dp))
+            .border(if (focused) 3.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(14.dp))
             .clickable { onPlay(channel) }.focusable().padding(14.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(52.dp).background(Color(0xFF0A1624), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(52.dp).background(TvColors.Placeholder, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                 if (channel.logo.isNotBlank()) {
                     AsyncImage(model = channel.logo, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(5.dp))
                 } else {
@@ -409,8 +409,8 @@ private fun PosterTile(channel: Channel, onPlay: (Channel) -> Unit) {
     ) {
         Box(
             Modifier.fillMaxWidth().height(220.dp).clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFF0A1624))
-                .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(12.dp)),
+                .background(TvColors.Placeholder)
+                .border(if (focused) 3.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center,
         ) {
             if (channel.logo.isNotBlank()) {

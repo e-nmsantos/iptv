@@ -26,10 +26,6 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 
-internal val PlayerPanel = Color(0xF20B1929)
-internal val PlayerFocused = Color(0xFF193A52)
-internal val PlayerAccent = Color(0xFF41D3BD)
-internal val PlayerMuted = Color(0xFFA6B4C4)
 
 @Composable
 internal fun SubtitleOption(label: String, selected: Boolean, onClick: () -> Unit) {
@@ -38,7 +34,7 @@ internal fun SubtitleOption(label: String, selected: Boolean, onClick: () -> Uni
         Modifier.fillMaxWidth().padding(vertical = 4.dp)
             .onFocusChanged { focused = it.isFocused }
             .background(
-                when { focused -> PlayerAccent; selected -> Color(0xFF183B4D); else -> Color.Transparent },
+                when { focused -> PlayerAccent; selected -> TvColors.Selected; else -> Color.Transparent },
                 RoundedCornerShape(8.dp),
             )
             .clickable(onClick = onClick)
@@ -132,7 +128,7 @@ internal fun ControlBarButton(label: String, modifier: Modifier = Modifier, onCl
     Box(
         modifier
             .onFocusChanged { focused = it.isFocused }
-            .background(if (focused) PlayerAccent else Color(0xFF193A52), RoundedCornerShape(10.dp))
+            .background(if (focused) PlayerAccent else TvColors.PanelFocused, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .focusable()
             .padding(horizontal = 16.dp, vertical = 12.dp),

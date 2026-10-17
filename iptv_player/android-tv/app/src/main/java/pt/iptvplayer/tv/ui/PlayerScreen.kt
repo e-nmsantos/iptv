@@ -8,6 +8,7 @@ import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalContext
@@ -48,10 +51,10 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.ui.PlayerView
-import androidx.tv.material3.Button
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import pt.iptvplayer.tv.R
+import pt.iptvplayer.tv.data.DecoderPreference
 import pt.iptvplayer.tv.data.PlayerSettings
 import pt.iptvplayer.tv.model.Channel
 import pt.iptvplayer.tv.model.EpgProgram
@@ -60,6 +63,7 @@ import pt.iptvplayer.tv.model.StreamType
 import pt.iptvplayer.tv.playback.PlaybackMetrics
 import pt.iptvplayer.tv.playback.StreamStats
 import pt.iptvplayer.tv.playback.buildPlayerSession
+import pt.iptvplayer.tv.playback.ffmpegSupports
 
 @Composable
 @OptIn(UnstableApi::class)
@@ -126,8 +130,24 @@ fun PlayerScreen(
     var ended by remember(channel.url) { mutableStateOf(false) }
 
     val metrics = remember(channel.url) { PlaybackMetrics() }
+    val audioPanelFocus = remember { FocusRequester() }
+    val subtitlePanelFocus = remember { FocusRequester() }
+    LaunchedEffect(showAudio) {
+        if (showAudio) { delay(80); runCatching { audioPanelFocus.requestFocus() } }
+    }
+    LaunchedEffect(showSubtitles) {
+        if (showSubtitles) { delay(80); runCatching { subtitlePanelFocus.requestFocus() } }
+    }
     val currentIndex = channels.indexOfFirst { sameChannel(it, channel) }.coerceAtLeast(0)
-    val session = remember(channel.url) { buildPlayerSession(context, channel, settings) }
+    // HLS often lists AAC, AC-3 and E-AC-3 renditions in one track group, which the track
+    // selector hands wholesale to the hardware renderer (it handles the AAC one), so the
+    // Dolby tracks show as unsupported. Picking one rebuilds the player with FFmpeg first.
+    var ffmpegAudioMime by remember(channel.url) { mutableStateOf<String?>(null) }
+    var restorePositionMs by remember(channel.url) { mutableStateOf<Long?>(null) }
+    val session = remember(channel.url, ffmpegAudioMime) {
+        val effective = if (ffmpegAudioMime != null) settings.copy(decoder = DecoderPreference.PREFER_FFMPEG) else settings
+        buildPlayerSession(context, channel, effective, ffmpegAudioMime)
+    }
     val player = session.player
 
     fun zap(offset: Int) {
@@ -225,7 +245,10 @@ fun PlayerScreen(
     }
 
     val handleKeyCode: (Int) -> Boolean = { keyCode ->
-        when (playerKeyAction(keyCode, guideVisible, isLive, controlsVisible)) {
+        // Any open panel or card takes the D-pad for its own focus navigation, so ▲/▼ never
+        // zap away underneath it.
+        val overlayOpen = controlsVisible || showAudio || showSubtitles || nextCardVisible || dueReminder != null
+        when (playerKeyAction(keyCode, guideVisible, isLive, overlayOpen)) {
             PlayerKeyAction.TOGGLE_GUIDE -> { guideVisible = !guideVisible; true }
             PlayerKeyAction.OPEN_GUIDE -> { guideVisible = true; true }
             PlayerKeyAction.ZAP_PREVIOUS -> { zap(-1); true }
@@ -295,7 +318,12 @@ fun PlayerScreen(
                     if (isLive && liveBaselineOffsetMs == null && player.isCurrentMediaItemLive) {
                         liveBaselineOffsetMs = player.currentLiveOffset.takeIf { it != C.TIME_UNSET }
                     }
-                    if (!isLive && !resumeApplied && channel.resumePositionMs > 0) {
+                    val restore = restorePositionMs
+                    if (!isLive && restore != null && restore > 0) {
+                        player.seekTo(restore)
+                        restorePositionMs = null
+                        resumeApplied = true
+                    } else if (!isLive && !resumeApplied && channel.resumePositionMs > 0) {
                         player.seekTo(channel.resumePositionMs)
                         resumeApplied = true
                     }
@@ -516,7 +544,7 @@ fun PlayerScreen(
                     notice ?: "A ligar ao canal…",
                     color = Color.White,
                     fontSize = 18.sp,
-                    modifier = Modifier.align(Alignment.Center).background(Color(0xB807111F), RoundedCornerShape(9.dp)).padding(14.dp),
+                    modifier = Modifier.align(Alignment.Center).background(TvColors.Toast, RoundedCornerShape(9.dp)).padding(14.dp),
                 )
             }
             if (isLive && paused && hasPlayed && playbackError == null) {
@@ -524,23 +552,23 @@ fun PlayerScreen(
                     if (session.timeshiftEnabled) "⏸  Em pausa — o direto continua a ser guardado" else "⏸  Em pausa",
                     color = Color.White,
                     fontSize = 18.sp,
-                    modifier = Modifier.align(Alignment.Center).background(Color(0xB807111F), RoundedCornerShape(9.dp)).padding(14.dp),
+                    modifier = Modifier.align(Alignment.Center).background(TvColors.Toast, RoundedCornerShape(9.dp)).padding(14.dp),
                 )
             }
             playbackError?.let { message ->
                 Column(
-                    Modifier.align(Alignment.Center).background(Color(0xF010243A), RoundedCornerShape(14.dp)).padding(28.dp),
+                    Modifier.align(Alignment.Center).background(TvColors.Dialog, RoundedCornerShape(14.dp)).padding(28.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text("Não foi possível reproduzir", color = Color.White, fontSize = 22.sp)
                     Text(message, color = PlayerMuted, modifier = Modifier.padding(vertical = 12.dp))
-                    Button(onClick = {
+                    BrandButton(onClick = {
                         playbackError = null
                         buffering = true
                         player.prepare()
                         player.play()
                     }) { Text("Tentar novamente") }
-                    Button(onClick = { guideVisible = true }, modifier = Modifier.padding(top = 8.dp)) { Text("Escolher outro canal") }
+                    BrandButton(onClick = { guideVisible = true }, modifier = Modifier.padding(top = 8.dp)) { Text("Escolher outro canal") }
                 }
             }
         }
@@ -561,7 +589,7 @@ fun PlayerScreen(
                 color = Color.White,
                 fontSize = 15.sp,
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 28.dp)
-                    .background(Color(0xE6040A12), RoundedCornerShape(10.dp)).padding(horizontal = 18.dp, vertical = 10.dp),
+                    .background(TvColors.Scrim, RoundedCornerShape(10.dp)).padding(horizontal = 18.dp, vertical = 10.dp),
             )
         }
         if (isLive && infoVisible && !guideVisible && !controlsVisible) {
@@ -591,7 +619,7 @@ fun PlayerScreen(
                 color = PlayerMuted,
                 fontSize = 13.sp,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)
-                    .background(Color(0xB807111F), RoundedCornerShape(8.dp)).padding(horizontal = 14.dp, vertical = 8.dp),
+                    .background(TvColors.Toast, RoundedCornerShape(8.dp)).padding(horizontal = 14.dp, vertical = 8.dp),
             )
         }
         if (seekBarVisible && !controlsVisible && !isLive && !guideVisible) {
@@ -599,7 +627,7 @@ fun PlayerScreen(
             val duration = remember(positionTick) { player.duration.coerceAtLeast(0) }
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 48.dp, vertical = 30.dp)
-                    .background(Color(0xE60B1929), RoundedCornerShape(12.dp)).padding(20.dp),
+                    .background(TvColors.OverlaySoft, RoundedCornerShape(12.dp)).padding(20.dp),
             ) {
                 ProgressLine(if (duration > 0) position.toFloat() / duration else 0f, Modifier.fillMaxWidth(), height = 6)
                 Spacer(Modifier.height(10.dp))
@@ -615,16 +643,16 @@ fun PlayerScreen(
         if (controlsVisible && !guideVisible) {
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 40.dp, vertical = 28.dp)
-                    .background(Color(0xE60B1929), RoundedCornerShape(14.dp)).padding(20.dp),
+                    .background(TvColors.OverlaySoft, RoundedCornerShape(14.dp)).padding(20.dp),
             ) {
                 if (isLive) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(channel.name, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(12.dp))
                         if (behindLiveMs > 1_000) {
-                            Badge("EM DIFERIDO −${formatDuration(behindLiveMs)}", Color(0xFFF0B429), Color.Black)
+                            Badge("EM DIFERIDO −${formatDuration(behindLiveMs)}", TvColors.Warning, Color.Black)
                         } else {
-                            Badge("● DIRETO", Color(0xFFE50914), Color.White)
+                            Badge("● DIRETO", TvColors.Live, Color.White)
                         }
                     }
                     Spacer(Modifier.height(14.dp))
@@ -692,7 +720,8 @@ fun PlayerScreen(
             val textGroups = tracksState?.groups?.filter { it.type == C.TRACK_TYPE_TEXT } ?: emptyList()
             Column(
                 Modifier.align(Alignment.CenterEnd).width(360.dp)
-                    .background(PlayerPanel, RoundedCornerShape(14.dp)).padding(20.dp),
+                    .background(PlayerPanel, RoundedCornerShape(14.dp)).padding(20.dp)
+                    .focusRequester(subtitlePanelFocus).focusGroup(),
             ) {
                 Text("Legendas", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(14.dp))
@@ -728,12 +757,12 @@ fun PlayerScreen(
                 }
                 Spacer(Modifier.height(10.dp))
                 if (!isLive) {
-                    Button(onClick = { showOnlineSubs = true; showSubtitles = false }) {
+                    BrandButton(onClick = { showOnlineSubs = true; showSubtitles = false }) {
                         Text("🔍 Procurar Legendas Online...")
                     }
                     Spacer(Modifier.height(8.dp))
                 }
-                Button(onClick = { showSubtitles = false }) { Text("Fechar") }
+                BrandButton(onClick = { showSubtitles = false }) { Text("Fechar") }
             }
         }
         if (showOnlineSubs) {
@@ -765,7 +794,8 @@ fun PlayerScreen(
             val audioGroups = tracksState?.groups?.filter { it.type == C.TRACK_TYPE_AUDIO } ?: emptyList()
             Column(
                 Modifier.align(Alignment.CenterEnd).width(360.dp)
-                    .background(PlayerPanel, RoundedCornerShape(14.dp)).padding(20.dp),
+                    .background(PlayerPanel, RoundedCornerShape(14.dp)).padding(20.dp)
+                    .focusRequester(audioPanelFocus).focusGroup(),
             ) {
                 Text("Áudio", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(14.dp))
@@ -788,7 +818,18 @@ fun PlayerScreen(
                             val label = listOf(base, codec).filter(String::isNotBlank).joinToString(" · ") +
                                 if (supported) "" else " (não suportada)"
                             if (!supported) {
-                                Text(label, color = PlayerMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp, horizontal = 14.dp))
+                                if (ffmpegSupports(format.sampleMimeType)) {
+                                    SubtitleOption(
+                                        listOf(base, codec).filter(String::isNotBlank).joinToString(" · ") + " · via FFmpeg",
+                                        selected = false,
+                                    ) {
+                                        restorePositionMs = player.currentPosition.takeIf { !isLive }
+                                        ffmpegAudioMime = format.sampleMimeType
+                                        showAudio = false
+                                    }
+                                } else {
+                                    Text(label, color = PlayerMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp, horizontal = 14.dp))
+                                }
                                 continue
                             }
                             SubtitleOption(label, selected = group.isTrackSelected(trackIndex)) {
@@ -802,7 +843,7 @@ fun PlayerScreen(
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-                Button(onClick = { showAudio = false }) { Text("Fechar") }
+                BrandButton(onClick = { showAudio = false }) { Text("Fechar") }
             }
         }
     }

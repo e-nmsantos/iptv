@@ -32,7 +32,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.tv.material3.Button
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 
@@ -59,7 +58,7 @@ fun TrackSelectionDialog(
         Column(
             Modifier
                 .width(420.dp)
-                .background(Color(0xFF10243A), RoundedCornerShape(16.dp))
+                .background(TvColors.Panel, RoundedCornerShape(16.dp))
                 .padding(24.dp),
         ) {
             Text(
@@ -73,7 +72,7 @@ fun TrackSelectionDialog(
             if (tracks.isEmpty()) {
                 Text(
                     "Nenhuma faixa disponível.",
-                    color = Color(0xFFA6B4C4),
+                    color = TvColors.Muted,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(vertical = 12.dp),
                 )
@@ -91,9 +90,9 @@ fun TrackSelectionDialog(
                                 .onFocusChanged { isFocused = it.isFocused }
                                 .background(
                                     when {
-                                        isFocused -> Color(0xFF41D3BD)
-                                        item.isSelected -> Color(0xFF193A52)
-                                        else -> Color(0xFF07111F)
+                                        isFocused -> TvColors.Accent
+                                        item.isSelected -> TvColors.PanelFocused
+                                        else -> TvColors.Background
                                     },
                                     RoundedCornerShape(8.dp),
                                 )
@@ -115,7 +114,7 @@ fun TrackSelectionDialog(
                                 if (item.isSelected) {
                                     Text(
                                         "✓ Ativo",
-                                        color = if (isFocused) Color(0xFF07111F) else Color(0xFF41D3BD),
+                                        color = if (isFocused) TvColors.Background else TvColors.Accent,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp,
                                     )
@@ -128,7 +127,7 @@ fun TrackSelectionDialog(
 
             Spacer(Modifier.height(16.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                Button(onClick = onDismiss) {
+                BrandButton(onClick = onDismiss) {
                     Text("Fechar")
                 }
             }

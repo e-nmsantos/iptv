@@ -51,13 +51,13 @@ internal fun LiveInfoBanner(
     Row(
         modifier.fillMaxWidth()
             .background(
-                Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6040A12), Color(0xF2040A12))),
+                Brush.verticalGradient(listOf(Color.Transparent, TvColors.Scrim, TvColors.ScrimStrong)),
             )
             .padding(start = 48.dp, end = 48.dp, top = 40.dp, bottom = 30.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(84.dp).background(Color(0xFF0A1624), RoundedCornerShape(14.dp)),
+            Modifier.size(84.dp).background(TvColors.Placeholder, RoundedCornerShape(14.dp)),
             contentAlignment = Alignment.Center,
         ) {
             if (channel.logo.isNotBlank()) {
@@ -93,13 +93,13 @@ internal fun LiveInfoBanner(
                 }
                 Spacer(Modifier.width(10.dp))
                 if (behindLiveMs > 1_000) {
-                    Badge("EM DIFERIDO −${formatDuration(behindLiveMs)}", Color(0xFFF0B429), Color.Black)
+                    Badge("EM DIFERIDO −${formatDuration(behindLiveMs)}", TvColors.Warning, Color.Black)
                 } else {
-                    Badge("● DIRETO", Color(0xFFE50914), Color.White)
+                    Badge("● DIRETO", TvColors.Live, Color.White)
                 }
                 if (channel.favorite) {
                     Spacer(Modifier.width(10.dp))
-                    Text("★", color = Color(0xFFF5C518), fontSize = 20.sp)
+                    Text("★", color = TvColors.Gold, fontSize = 20.sp)
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -167,13 +167,13 @@ internal fun ProgressLine(fraction: Float, modifier: Modifier = Modifier, height
 @Composable
 internal fun ChannelNumberOverlay(digits: String, preview: Channel?, modifier: Modifier = Modifier) {
     Column(
-        modifier.background(Color(0xE6040A12), RoundedCornerShape(16.dp)).padding(horizontal = 26.dp, vertical = 16.dp),
+        modifier.background(TvColors.Scrim, RoundedCornerShape(16.dp)).padding(horizontal = 26.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.End,
     ) {
         Text(digits, color = Color.White, fontSize = 48.sp, fontWeight = FontWeight.Bold)
         Text(
             preview?.name ?: "Canal inexistente",
-            color = if (preview == null) Color(0xFFF0B429) else PlayerMuted,
+            color = if (preview == null) TvColors.Warning else PlayerMuted,
             fontSize = 14.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -185,7 +185,7 @@ internal fun ChannelNumberOverlay(digits: String, preview: Channel?, modifier: M
 @Composable
 internal fun StreamStatsOverlay(stats: StreamStats, timeshiftEnabled: Boolean, modifier: Modifier = Modifier) {
     Column(
-        modifier.background(Color(0xD9040A12), RoundedCornerShape(12.dp)).padding(16.dp).widthIn(min = 300.dp),
+        modifier.background(TvColors.ScrimSoft, RoundedCornerShape(12.dp)).padding(16.dp).widthIn(min = 300.dp),
     ) {
         Text("ESTATÍSTICAS", color = PlayerAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
@@ -223,10 +223,10 @@ internal fun NextEpisodeCard(
         runCatching { playRequester.requestFocus() }
     }
     Row(
-        modifier.background(Color(0xF20B1929), RoundedCornerShape(16.dp)).padding(18.dp).width(520.dp),
+        modifier.background(TvColors.Overlay, RoundedCornerShape(16.dp)).padding(18.dp).width(520.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(width = 150.dp, height = 88.dp).background(Color(0xFF0A1624), RoundedCornerShape(10.dp))) {
+        Box(Modifier.size(width = 150.dp, height = 88.dp).background(TvColors.Placeholder, RoundedCornerShape(10.dp))) {
             if (next.logo.isNotBlank()) {
                 AsyncImage(
                     model = next.logo,
@@ -268,7 +268,7 @@ internal fun ReminderCard(
         delay(80)
         runCatching { watchRequester.requestFocus() }
     }
-    Column(modifier.background(Color(0xF20B1929), RoundedCornerShape(16.dp)).padding(20.dp).width(440.dp)) {
+    Column(modifier.background(TvColors.Overlay, RoundedCornerShape(16.dp)).padding(20.dp).width(440.dp)) {
         Text(
             if (System.currentTimeMillis() < reminder.startMillis) "🔔 Começa dentro de momentos" else "🔔 Já começou",
             color = PlayerAccent,

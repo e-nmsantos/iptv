@@ -36,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -51,7 +52,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.google.zxing.BarcodeFormat
@@ -85,8 +85,8 @@ private fun PlaylistsDialog(
                 Text("${playlist.name} será removida desta televisão.", color = Muted)
                 Spacer(Modifier.height(18.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { onDelete(playlist.id) }) { Text("Remover") }
-                    Button(onClick = { pendingDelete = null }) { Text("Cancelar") }
+                    BrandButton(onClick = { onDelete(playlist.id) }) { Text("Remover") }
+                    BrandButton(onClick = { pendingDelete = null }) { Text("Cancelar") }
                 }
             }
         }
@@ -101,7 +101,7 @@ private fun PlaylistsDialog(
                     Text("As minhas listas", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
                     Text("Escolhe o catálogo que queres usar", color = Muted)
                 }
-                Button(onClick = onAdd) { Text("＋ Adicionar") }
+                BrandButton(onClick = onAdd) { Text("＋ Adicionar") }
             }
             Spacer(Modifier.height(18.dp))
             if (playlists.isEmpty()) {
@@ -116,8 +116,8 @@ private fun PlaylistsDialog(
                     items(playlists, key = { it.id }) { playlist ->
                         Column(
                             Modifier.fillMaxWidth()
-                                .background(if (playlist.active) Color(0xFF183B4D) else Background, RoundedCornerShape(12.dp))
-                                .border(if (playlist.active) 2.dp else 0.dp, Accent, RoundedCornerShape(12.dp))
+                                .background(if (playlist.active) TvColors.Selected else Background, RoundedCornerShape(12.dp))
+                                .border(if (playlist.active) 2.dp else 0.dp, if (playlist.active) Accent else Color.Transparent, RoundedCornerShape(12.dp))
                                 .padding(16.dp),
                         ) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -131,20 +131,20 @@ private fun PlaylistsDialog(
                                     )
                                 }
                                 if (!playlist.active) {
-                                    Button(onClick = { onSelect(playlist.id) }) { Text("Abrir") }
+                                    BrandButton(onClick = { onSelect(playlist.id) }) { Text("Abrir") }
                                     Spacer(Modifier.width(8.dp))
                                 } else {
-                                    Button(onClick = onRefresh) { Text("Atualizar") }
+                                    BrandButton(onClick = onRefresh) { Text("Atualizar") }
                                     Spacer(Modifier.width(8.dp))
                                 }
-                                Button(onClick = { pendingDelete = playlist }) { Text("Remover") }
+                                BrandButton(onClick = { pendingDelete = playlist }) { Text("Remover") }
                             }
                         }
                     }
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Fechar") }
+            BrandButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Fechar") }
         }
     }
 }
@@ -183,17 +183,17 @@ private fun ImportDialog(
         DialogPanel {
             Text("Adicionar lista", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(18.dp))
-            Button(onClick = onPhone, modifier = Modifier.fillMaxWidth()) { Text("Enviar pelo telemóvel (QR)") }
+            BrandButton(onClick = onPhone, modifier = Modifier.fillMaxWidth()) { Text("Enviar pelo telemóvel (QR)") }
             Spacer(Modifier.height(10.dp))
-            Button(onClick = { enterUrl = true }, modifier = Modifier.fillMaxWidth()) { Text("M3U por endereço URL") }
+            BrandButton(onClick = { enterUrl = true }, modifier = Modifier.fillMaxWidth()) { Text("M3U por endereço URL") }
             Spacer(Modifier.height(10.dp))
-            Button(onClick = onFile, modifier = Modifier.fillMaxWidth()) { Text("Abrir ficheiro M3U") }
+            BrandButton(onClick = onFile, modifier = Modifier.fillMaxWidth()) { Text("Abrir ficheiro M3U") }
             Spacer(Modifier.height(10.dp))
-            Button(onClick = { enterXtream = true }, modifier = Modifier.fillMaxWidth()) { Text("Xtream Codes") }
+            BrandButton(onClick = { enterXtream = true }, modifier = Modifier.fillMaxWidth()) { Text("Xtream Codes") }
             Spacer(Modifier.height(10.dp))
-            Button(onClick = { enterStalker = true }, modifier = Modifier.fillMaxWidth()) { Text("Stalker Portal (MAC)") }
+            BrandButton(onClick = { enterStalker = true }, modifier = Modifier.fillMaxWidth()) { Text("Stalker Portal (MAC)") }
             Spacer(Modifier.height(10.dp))
-            Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
+            BrandButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
         }
     }
 }
@@ -213,18 +213,18 @@ internal fun XtreamDialog(onDismiss: () -> Unit, onConfirm: (String, String, Str
             if (server.trim().startsWith("http://", ignoreCase = true)) {
                 Text(
                     "Aviso: HTTP envia o utilizador e a palavra-passe sem proteção de transporte.",
-                    color = Color(0xFFFFB36B),
+                    color = TvColors.Caution,
                     fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(8.dp))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = {
+                BrandButton(onClick = {
                     if (server.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
                         onConfirm(server.trim(), username.trim(), password)
                     }
                 }) { Text("Ligar") }
-                Button(onClick = onDismiss) { Text("Cancelar") }
+                BrandButton(onClick = onDismiss) { Text("Cancelar") }
             }
         }
     }
@@ -243,16 +243,16 @@ internal fun StalkerDialog(onDismiss: () -> Unit, onConfirm: (String, String) ->
             if (portal.isNotBlank() && !portal.trim().startsWith("https://", ignoreCase = true)) {
                 Text(
                     "Aviso: este endereço será usado por HTTP; o MAC e a sessão podem ser intercetados.",
-                    color = Color(0xFFFFB36B),
+                    color = TvColors.Caution,
                     fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(8.dp))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = {
+                BrandButton(onClick = {
                     if (portal.isNotBlank() && mac.isNotBlank()) onConfirm(portal.trim(), mac.trim())
                 }) { Text("Ligar") }
-                Button(onClick = onDismiss) { Text("Cancelar") }
+                BrandButton(onClick = onDismiss) { Text("Cancelar") }
             }
         }
     }
@@ -324,13 +324,13 @@ internal fun PairingDialog(
                     Text(message, color = if (message.contains("sucesso")) Accent else Muted, fontSize = 18.sp)
                     Spacer(Modifier.height(14.dp))
                     if (!message.contains("sucesso")) {
-                        Button(onClick = onNewCode, modifier = Modifier.fillMaxWidth()) { Text("Criar novo código") }
+                        BrandButton(onClick = onNewCode, modifier = Modifier.fillMaxWidth()) { Text("Criar novo código") }
                         Spacer(Modifier.height(10.dp))
                     }
                 }
                 else -> Text("A preparar ligação local…", color = Muted)
             }
-            Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Fechar") }
+            BrandButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Fechar") }
         }
     }
 }
@@ -371,6 +371,7 @@ internal fun TextEntryDialog(
 ) {
     var value by remember(initialValue) { mutableStateOf(initialValue) }
     val focusRequester = remember { FocusRequester() }
+    val confirmRequester = remember { FocusRequester() }
     Dialog(onDismissRequest = onDismiss) {
         DialogPanel {
             Text(title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -385,13 +386,34 @@ internal fun TextEntryDialog(
                     singleLine = true,
                     textStyle = androidx.compose.ui.text.TextStyle(color = Background, fontSize = 17.sp),
                     cursorBrush = Brush.verticalGradient(listOf(Accent, Accent)),
-                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                    // The on-screen keyboard's ✓ confirms directly; ▼ always reaches the buttons
+                    // (text fields otherwise swallow D-pad keys on many TV keyboards).
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+                    ),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onDone = { if (value.isNotBlank()) onConfirm(value.trim()) },
+                    ),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester)
+                        .onPreviewKeyEvent { event ->
+                            if (event.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN &&
+                                event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                            ) {
+                                runCatching { confirmRequester.requestFocus() }
+                                true
+                            } else {
+                                false
+                            }
+                        },
                 )
             }
             Spacer(Modifier.height(15.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { if (value.isNotBlank()) onConfirm(value.trim()) }) { Text("Confirmar") }
-                Button(onClick = onDismiss) { Text("Cancelar") }
+                BrandButton(
+                    onClick = { if (value.isNotBlank()) onConfirm(value.trim()) },
+                    modifier = Modifier.focusRequester(confirmRequester),
+                ) { Text("Confirmar") }
+                BrandButton(onClick = onDismiss) { Text("Cancelar") }
             }
         }
     }
@@ -406,7 +428,7 @@ internal fun MessageDialog(message: String, onDismiss: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             Text(message, color = Muted)
             Spacer(Modifier.height(18.dp))
-            Button(onClick = onDismiss) { Text("Fechar") }
+            BrandButton(onClick = onDismiss) { Text("Fechar") }
         }
     }
 }

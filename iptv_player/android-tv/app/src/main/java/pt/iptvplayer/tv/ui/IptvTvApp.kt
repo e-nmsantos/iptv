@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -49,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,7 +59,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.google.zxing.BarcodeFormat
@@ -66,6 +68,7 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import kotlinx.coroutines.delay
 import coil3.compose.AsyncImage
 import pt.iptvplayer.tv.CatalogUiState
+import pt.iptvplayer.tv.R
 import pt.iptvplayer.tv.CatalogViewModel
 import pt.iptvplayer.tv.data.PlayerSettings
 import pt.iptvplayer.tv.model.Channel
@@ -76,11 +79,6 @@ import pt.iptvplayer.tv.model.PlaylistSummary
 import pt.iptvplayer.tv.model.StreamType
 import pt.iptvplayer.tv.model.projectCatalog
 
-internal val Background = Color(0xFF07111F)
-internal val Panel = Color(0xFF10243A)
-internal val PanelFocused = Color(0xFF193A52)
-internal val Accent = Color(0xFF41D3BD)
-internal val Muted = Color(0xFFA6B4C4)
 private enum class MainDestination { HOME, CATALOG, EPG, LISTS, ADD, SETTINGS, DIAGNOSTICS }
 internal enum class AddMethod { M3U_URL, XTREAM, STALKER }
 
@@ -304,6 +302,15 @@ private fun CatalogScreen(
             else -> Unit
         }
     }
+    // A freshly imported list takes the viewer straight to its Início instead of leaving
+    // them on the "Adicionar" screen wondering whether it worked.
+    var knownPlaylistCount by remember { mutableStateOf(state.playlists.size) }
+    LaunchedEffect(state.playlists.size) {
+        if (state.playlists.size > knownPlaylistCount && destination == MainDestination.ADD) {
+            onDestinationChange(MainDestination.HOME)
+        }
+        knownPlaylistCount = state.playlists.size
+    }
     BackHandler(enabled = state.seriesTitle != null, onBack = onCloseSeries)
     Row(Modifier.fillMaxSize().background(Background)) {
         NavigationSidebar(
@@ -490,7 +497,7 @@ private fun Header(
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         if (onBack != null) {
-            Button(onClick = onBack) { Text("Voltar") }
+            BrandButton(onClick = onBack) { Text("Voltar") }
             Spacer(Modifier.width(14.dp))
         }
         Column(Modifier.weight(1f)) {
@@ -512,12 +519,12 @@ private fun Header(
             )
         }
         if (query.isNotBlank()) {
-            Button(onClick = onClearQuery) {
+            BrandButton(onClick = onClearQuery) {
                 Text("✕ Limpar pesquisa")
             }
             Spacer(Modifier.width(10.dp))
         }
-        Button(onClick = onToggleView) {
+        BrandButton(onClick = onToggleView) {
             Text(if (viewAsList) "Ver em grelha" else "Ver em lista")
         }
     }
@@ -539,10 +546,22 @@ private fun NavigationSidebar(
     onDiagnostics: () -> Unit,
 ) {
     Column(
-        Modifier.width(210.dp).fillMaxSize().background(Color(0xFF0B1929)).padding(22.dp),
+        // Scrollable so every entry stays reachable on a 540 dp-tall TV screen.
+        Modifier.width(210.dp).fillMaxSize().background(TvColors.Sidebar)
+            .verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp),
     ) {
-        Text("IPTV", color = Accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        Text("PLAYER TV", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Image(
+                painter = painterResource(R.mipmap.ic_launcher),
+                contentDescription = null,
+                modifier = Modifier.size(38.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text("IPTV", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, lineHeight = 17.sp)
+                Text("Player", color = Accent, fontSize = 16.sp, fontWeight = FontWeight.Bold, lineHeight = 17.sp)
+            }
+        }
         Spacer(Modifier.height(18.dp))
         ActivePlaylistBadge(playlistName, playlistCount > 1, onPlaylists)
         Spacer(Modifier.height(20.dp))
@@ -553,7 +572,7 @@ private fun NavigationSidebar(
         SidebarItem("▤  Guia TV", destination == MainDestination.EPG, onEpg)
         Spacer(Modifier.height(14.dp))
         SidebarItem("☷  Listas", destination == MainDestination.LISTS, onPlaylists)
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(14.dp))
         SidebarItem("⌕  Pesquisar", false, onSearch)
         SidebarItem("＋  Adicionar", destination == MainDestination.ADD, onImport)
         SidebarItem("⚙  Definições", destination == MainDestination.SETTINGS, onSettings)
@@ -565,7 +584,7 @@ private fun NavigationSidebar(
 private fun SidebarItem(label: String, selected: Boolean, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     Box(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp)
+        Modifier.fillMaxWidth().padding(vertical = 2.dp)
             .graphicsLayer {
                 scaleX = if (focused) 1.04f else 1f
                 scaleY = if (focused) 1.04f else 1f
@@ -573,7 +592,7 @@ private fun SidebarItem(label: String, selected: Boolean, onClick: () -> Unit) {
             .background(
                 when {
                     focused -> Accent
-                    selected -> Color(0xFF183B4D)
+                    selected -> TvColors.Selected
                     else -> Color.Transparent
                 },
                 RoundedCornerShape(10.dp),
@@ -581,7 +600,7 @@ private fun SidebarItem(label: String, selected: Boolean, onClick: () -> Unit) {
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
             .focusable()
-            .padding(horizontal = 14.dp, vertical = 13.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Text(
             label,
@@ -597,7 +616,7 @@ private fun ActivePlaylistBadge(name: String, multipleAvailable: Boolean, onClic
     Column(
         Modifier.fillMaxWidth()
             .background(if (focused) Accent else Panel, RoundedCornerShape(10.dp))
-            .border(if (focused) 0.dp else 1.dp, Color(0xFF23445C), RoundedCornerShape(10.dp))
+            .border(if (focused) 0.dp else 1.dp, TvColors.Border, RoundedCornerShape(10.dp))
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
             .focusable()
@@ -655,14 +674,14 @@ private fun FocusChip(label: String, selected: Boolean, modifier: Modifier = Mod
     var focused by remember { mutableStateOf(false) }
     val color = when {
         focused -> Accent
-        selected -> Color(0xFF245C68)
+        selected -> TvColors.Selected
         else -> Panel
     }
     Box(
         modifier
             .onFocusChanged { focused = it.isFocused }
             .background(color, RoundedCornerShape(10.dp))
-            .border(if (focused) 2.dp else 0.dp, Color.White, RoundedCornerShape(10.dp))
+            .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .focusable()
             .padding(horizontal = 18.dp, vertical = 10.dp),
@@ -717,7 +736,7 @@ private fun ChannelGrid(
         }
         if (hasMore) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Button(onClick = onLoadMore, modifier = Modifier.fillMaxWidth()) {
+                BrandButton(onClick = onLoadMore, modifier = Modifier.fillMaxWidth()) {
                     Text("Carregar mais conteúdos")
                 }
             }
@@ -759,7 +778,7 @@ private fun ChannelList(
         }
         if (hasMore) {
             item {
-                Button(onClick = onLoadMore, modifier = Modifier.fillMaxWidth()) {
+                BrandButton(onClick = onLoadMore, modifier = Modifier.fillMaxWidth()) {
                     Text("Carregar mais conteúdos")
                 }
             }
@@ -785,7 +804,7 @@ private fun ChannelListItem(
             }
             .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused(channel.id) }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(13.dp))
-            .border(if (focused) 2.dp else 0.dp, Accent, RoundedCornerShape(13.dp))
+            .border(if (focused) 2.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(13.dp))
             .clickable { onPlay(channel) }
             .focusable()
             .padding(horizontal = 18.dp, vertical = 14.dp),
@@ -837,14 +856,14 @@ private fun LiveChannelCard(
             }
             .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused(channel.id) }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(13.dp))
-            .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(13.dp))
+            .border(if (focused) 3.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(13.dp))
             .clickable { onPlay(channel) }
             .focusable()
             .padding(13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(64.dp).background(Color(0xFF0A1624), RoundedCornerShape(10.dp)),
+            Modifier.size(64.dp).background(TvColors.Placeholder, RoundedCornerShape(10.dp)),
             contentAlignment = Alignment.Center,
         ) {
             if (channel.logo.isNotBlank()) {
@@ -895,13 +914,13 @@ private fun PosterChannelCard(
             }
             .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused(channel.id) }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(13.dp))
-            .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(13.dp))
+            .border(if (focused) 3.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(13.dp))
             .clickable { onPlay(channel) }
             .focusable()
             .padding(7.dp),
     ) {
         Box(
-            Modifier.fillMaxWidth().height(205.dp).background(Color(0xFF0A1624), RoundedCornerShape(9.dp)),
+            Modifier.fillMaxWidth().height(205.dp).background(TvColors.Placeholder, RoundedCornerShape(9.dp)),
             contentAlignment = Alignment.Center,
         ) {
             if (channel.logo.isNotBlank()) {
@@ -962,7 +981,7 @@ private fun EmptyCatalog(onImport: () -> Unit) {
         Spacer(Modifier.height(8.dp))
         Text("Adiciona uma lista M3U por URL ou ficheiro.", color = Muted)
         Spacer(Modifier.height(20.dp))
-        Button(onClick = onImport) { Text("Adicionar primeira lista") }
+        BrandButton(onClick = onImport) { Text("Adicionar primeira lista") }
     }
 }
 
@@ -990,7 +1009,7 @@ private fun PlaylistManagerScreen(
                 Text("As minhas listas", color = Color.White, fontSize = 29.sp, fontWeight = FontWeight.Bold)
                 Text("Escolhe uma lista guardada ou atualiza apenas quando precisares.", color = Muted)
             }
-            Button(
+            BrandButton(
                 onClick = onAdd,
                 modifier = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier,
             ) { Text("＋ Nova lista") }
@@ -1010,15 +1029,15 @@ private fun PlaylistManagerScreen(
                 Spacer(Modifier.height(8.dp))
                 Text("Adiciona M3U, Xtream Codes ou Stalker Portal.", color = Muted)
                 Spacer(Modifier.height(18.dp))
-                Button(onClick = onAdd) { Text("Adicionar lista") }
+                BrandButton(onClick = onAdd) { Text("Adicionar lista") }
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(playlists, key = { it.id }) { playlist ->
                     Row(
                         Modifier.fillMaxWidth()
-                            .background(if (playlist.active) Color(0xFF183B4D) else Panel, RoundedCornerShape(14.dp))
-                            .border(if (playlist.active) 2.dp else 0.dp, Accent, RoundedCornerShape(14.dp))
+                            .background(if (playlist.active) TvColors.Selected else Panel, RoundedCornerShape(14.dp))
+                            .border(if (playlist.active) 2.dp else 0.dp, if (playlist.active) Accent else Color.Transparent, RoundedCornerShape(14.dp))
                             .padding(18.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -1034,10 +1053,10 @@ private fun PlaylistManagerScreen(
                                 color = if (playlist.active) Accent else Muted,
                             )
                         }
-                        if (playlist.active) Button(onClick = onRefresh, enabled = !busy) { Text("Atualizar") }
-                        else Button(onClick = { onSelect(playlist.id) }, enabled = !busy) { Text("Abrir") }
+                        if (playlist.active) BrandButton(onClick = onRefresh, enabled = !busy) { Text("Atualizar") }
+                        else BrandButton(onClick = { onSelect(playlist.id) }, enabled = !busy) { Text("Abrir") }
                         Spacer(Modifier.width(10.dp))
-                        Button(onClick = { pendingDelete = playlist }, enabled = !busy) { Text("Remover") }
+                        BrandButton(onClick = { pendingDelete = playlist }, enabled = !busy) { Text("Remover") }
                     }
                 }
             }
@@ -1051,8 +1070,8 @@ private fun PlaylistManagerScreen(
                 Text("${playlist.name} será removida desta televisão.", color = Muted)
                 Spacer(Modifier.height(18.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { pendingDelete = null; onDelete(playlist.id) }) { Text("Remover") }
-                    Button(onClick = { pendingDelete = null }) { Text("Cancelar") }
+                    BrandButton(onClick = { pendingDelete = null; onDelete(playlist.id) }) { Text("Remover") }
+                    BrandButton(onClick = { pendingDelete = null }) { Text("Cancelar") }
                 }
             }
         }
@@ -1076,12 +1095,12 @@ private fun AddPlaylistScreen(
                 Text("Adicionar uma lista", color = Color.White, fontSize = 29.sp, fontWeight = FontWeight.Bold)
                 Text("Escolhe como queres ligar. Os dados ficam guardados nesta televisão.", color = Muted)
             }
-            Button(onClick = onViewLists) { Text("Ver listas") }
+            BrandButton(onClick = onViewLists) { Text("Ver listas") }
         }
         Spacer(Modifier.height(22.dp))
         if (busy) {
             Box(
-                Modifier.fillMaxWidth().background(Color(0xFF183B4D), RoundedCornerShape(12.dp)).padding(16.dp),
+                Modifier.fillMaxWidth().background(TvColors.Selected, RoundedCornerShape(12.dp)).padding(16.dp),
             ) { Text("A validar, importar e guardar a lista…", color = Accent, fontWeight = FontWeight.Bold) }
             Spacer(Modifier.height(14.dp))
         }
@@ -1120,7 +1139,7 @@ private fun AddSourceCard(
             .graphicsLayer { scaleX = if (focused) 1.025f else 1f; scaleY = if (focused) 1.025f else 1f }
             .onFocusChanged { focused = it.isFocused }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(15.dp))
-            .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(15.dp))
+            .border(if (focused) 3.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(15.dp))
             .clickable(enabled = enabled, onClick = onClick).focusable(enabled)
             .padding(18.dp),
         verticalAlignment = Alignment.CenterVertically,

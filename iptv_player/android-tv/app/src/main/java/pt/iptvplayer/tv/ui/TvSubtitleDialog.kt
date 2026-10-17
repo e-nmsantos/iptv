@@ -31,7 +31,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.tv.material3.Button
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import pt.iptvplayer.tv.data.OnlineSubtitle
@@ -59,7 +58,7 @@ fun TvOnlineSubtitleSearchDialog(
         Column(
             Modifier
                 .width(480.dp)
-                .background(Color(0xFF10243A), RoundedCornerShape(16.dp))
+                .background(TvColors.Panel, RoundedCornerShape(16.dp))
                 .padding(24.dp),
         ) {
             Text(
@@ -70,7 +69,7 @@ fun TvOnlineSubtitleSearchDialog(
             )
             Text(
                 queryTitle,
-                color = Color(0xFFA6B4C4),
+                color = TvColors.Muted,
                 fontSize = 13.sp,
                 modifier = Modifier.padding(top = 2.dp, bottom = 12.dp),
             )
@@ -78,14 +77,14 @@ fun TvOnlineSubtitleSearchDialog(
             if (loading) {
                 Text(
                     "A pesquisar legendas online...",
-                    color = Color(0xFF41D3BD),
+                    color = TvColors.Accent,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(vertical = 16.dp),
                 )
             } else if (subtitles.isEmpty()) {
                 Text(
                     "Nenhuma legenda encontrada para este título.",
-                    color = Color(0xFFA6B4C4),
+                    color = TvColors.Muted,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(vertical = 16.dp),
                 )
@@ -102,7 +101,7 @@ fun TvOnlineSubtitleSearchDialog(
                                 .fillMaxWidth()
                                 .onFocusChanged { isFocused = it.isFocused }
                                 .background(
-                                    if (isFocused) Color(0xFF41D3BD) else Color(0xFF07111F),
+                                    if (isFocused) TvColors.Accent else TvColors.Background,
                                     RoundedCornerShape(8.dp),
                                 )
                                 .clickable { onSelectSubtitle(item) }
@@ -122,7 +121,7 @@ fun TvOnlineSubtitleSearchDialog(
                                 )
                                 Text(
                                     "[${item.language}]",
-                                    color = if (isFocused) Color(0xFF05332A) else Color(0xFF41D3BD),
+                                    color = if (isFocused) TvColors.OnAccent else TvColors.Accent,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.padding(start = 8.dp),
@@ -134,7 +133,7 @@ fun TvOnlineSubtitleSearchDialog(
             }
 
             Spacer(Modifier.height(14.dp))
-            Button(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+            BrandButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
                 Text("Fechar")
             }
         }

@@ -144,7 +144,7 @@ private fun SettingRow(
         modifier.fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
             .background(if (focused) PanelFocused else Panel, RoundedCornerShape(14.dp))
-            .border(if (focused) 2.dp else 0.dp, Accent, RoundedCornerShape(14.dp))
+            .border(if (focused) 2.dp else 0.dp, if (focused) Accent else Color.Transparent, RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .focusable()
             .padding(horizontal = 20.dp, vertical = 16.dp),
@@ -159,7 +159,7 @@ private fun SettingRow(
             value,
             color = if (focused) Background else Accent,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.background(if (focused) Accent else Color(0xFF183B4D), RoundedCornerShape(9.dp))
+            modifier = Modifier.background(if (focused) Accent else TvColors.Selected, RoundedCornerShape(9.dp))
                 .padding(horizontal = 14.dp, vertical = 8.dp),
         )
     }
