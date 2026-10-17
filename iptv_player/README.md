@@ -24,6 +24,20 @@ Um player de IPTV moderno e completo feito em Python com PySide6 e VLC.
 - 🔄 Carregamento assíncrono (UI não bloqueia)
 - ⚙ Definições configuráveis
 
+### Experiência premium
+- 🏠 **Início** com destaque, Continuar a ver (inclui episódios e o próximo
+  episódio), Vistos recentemente, Favoritos e novidades de filmes e séries
+- ⏸ **Pausa em direto** (timeshift do VLC em disco) com indicação "EM DIFERIDO"
+  e botão "Ir para o direto"
+- ⏭ **Próximo episódio** com contagem decrescente no fim de cada episódio
+- 🔢 Zapping por número (0–9), canal anterior (R ou Backspace) e banner
+  "agora / a seguir" sobre o vídeo (I)
+- 🔔 Lembretes e ⏺ gravações agendadas a partir da grelha do guia
+- 📊 Estatísticas da stream: resolução, fps, codecs, débito, frames perdidos
+- 📺 Sincronização de favoritos e pontos de retoma com a app Android TV, nos
+  dois sentidos, pela rede local (**Playlists → Sincronizar com a TV**, com o
+  PIN mostrado na TV)
+
 ## 📋 Requisitos
 
 - Python 3.9+
