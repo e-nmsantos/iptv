@@ -185,3 +185,76 @@ class TvSyncTests(unittest.TestCase):
             exchange_with_tv(endpoint, "12", lambda state: "{}")
         with self.assertRaisesRegex(ValueError, "rede local"):
             exchange_with_tv(TvEndpoint("x", "8.8.8.8", 80), "123456", lambda state: "{}")
+
+
+class ContinueSyncTests(unittest.TestCase):
+    """Episodes and films in "Continuar a ver" travel between devices without credentials."""
+
+    def _db(self, source, channels):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        db = DatabaseManager(Path(temp.name) / "s.db", secret_store=SecretStore.for_tests())
+        playlist = Playlist("Casa", source, channels)
+        playlist.server_url = "http://provider.example:8080"
+        playlist.username = "user"
+        playlist.password = "secret-pass"
+        return db, db.save_playlist(playlist)
+
+    def test_xtream_episode_and_film_reach_the_other_device(self):
+        from src.core.device_sync import export_device_state, import_device_state
+
+        film = Channel("Filme", "http://provider.example:8080/movie/user/secret-pass/5.mkv",
+                       stream_type="vod", source="xtream", xtream_id="5")
+        pc, pc_id = self._db("xtream", [film])
+        tv, tv_id = self._db("xtream", [film])
+
+        show = Channel("Série X", "", stream_type="series", source="xtream", xtream_id="77", logo="poster")
+        episode = Channel("Piloto", "http://provider.example:8080/series/user/secret-pass/9.mkv",
+                          stream_type="series", source="xtream", xtream_id="9",
+                          season_number=1, episode_number=1, container_extension="mkv")
+        pc.record_watch(pc_id, episode, parent=show)
+        pc.save_playback_progress(pc_id, episode, 600_000, 2_400_000)
+        saved_film = pc.get_channels(pc_id, stream_type="vod")[0]
+        pc.record_watch(pc_id, saved_film)
+        pc.save_playback_progress(pc_id, saved_film, 1_200_000, 6_000_000)
+
+        payload = export_device_state(pc, pc_id)
+        self.assertNotIn("secret-pass", payload)
+        result = import_device_state(tv, tv_id, payload)
+        self.assertEqual(result["continue"], 2)
+
+        items = {item["title"]: item for item in tv.get_continue_watching(tv_id)}
+        self.assertEqual(set(items), {"Piloto", "Filme"})
+        ep = items["Piloto"]
+        self.assertEqual(ep["channel"].url, "xtream-episode://9?ext=mkv")
+        self.assertEqual(ep["parent"].xtream_id, "77")
+        self.assertEqual(ep["position_ms"], 600_000)
+        self.assertEqual(items["Filme"]["position_ms"], 1_200_000)
+
+        # Importing the same state again changes nothing: the local entry is not older.
+        self.assertEqual(import_device_state(tv, tv_id, payload)["continue"], 0)
+
+    def test_stalker_episode_round_trip_and_newer_local_viewing_wins(self):
+        from datetime import timedelta
+
+        from src.core.device_sync import export_device_state, import_device_state
+        from src.core.episodes import stalker_episode_channel
+
+        pc, pc_id = self._db("stalker", [Channel("Canal", "ffrt http://x/1", source="stalker")])
+        tv, tv_id = self._db("stalker", [Channel("Canal", "ffrt http://x/1", source="stalker")])
+        show = Channel("Show", "", stream_type="series", source="stalker", xtream_id="44", category_id="7")
+        episode = stalker_episode_channel(show, {"cmd": "eyJzIjoxfQ==", "name": "Temporada 2"}, 3)
+        pc.record_watch(pc_id, episode, parent=show, up_next=True)
+
+        import_device_state(tv, tv_id, export_device_state(pc, pc_id))
+        received = tv.get_continue_watching(tv_id)[0]
+        self.assertTrue(received["up_next"])
+        self.assertEqual(received["channel"].tvg_id, episode.tvg_id)
+        self.assertEqual(received["parent"].category_id, "7")
+
+        # The TV then watches it further; an older PC state must not roll it back.
+        tv.record_watch(tv_id, received["channel"], parent=received["parent"],
+                        played_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+        tv.save_playback_progress(tv_id, received["channel"], 300_000, 1_800_000)
+        self.assertEqual(import_device_state(tv, tv_id, export_device_state(pc, pc_id))["continue"], 0)
+        self.assertFalse(tv.get_continue_watching(tv_id)[0]["up_next"])

@@ -1260,7 +1260,7 @@ class DeviceSyncTests(unittest.TestCase):
 
             result = import_device_state(database, playlist_id, payload)
 
-            self.assertEqual(result, {"favorites": 1, "progress": 1})
+            self.assertEqual(result, {"favorites": 1, "progress": 1, "continue": 0})
             self.assertTrue(database.get_channels(playlist_id)[0].is_favorite)
             self.assertEqual(database.get_playback_progress(playlist_id, saved)["position_ms"], 30_000)
 

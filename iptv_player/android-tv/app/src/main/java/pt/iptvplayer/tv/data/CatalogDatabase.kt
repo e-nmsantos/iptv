@@ -829,6 +829,7 @@ class CatalogDatabase(context: Context) :
                 }
             }
         }
+        data.optJSONArray("continue")?.let { applyContinueEntries(playlistId, it) }
     }
 
     @Synchronized
@@ -858,8 +859,90 @@ class CatalogDatabase(context: Context) :
             .put("exported_at", System.currentTimeMillis())
             .put("favorites", favorites)
             .put("progress", progress)
+            .put("continue", continueArray(playlistId))
             .toString()
     }
+
+    /** "Continuar a ver" (films and episodes) without URLs or credentials. */
+    private fun continueArray(playlistId: Long): org.json.JSONArray {
+        val array = org.json.JSONArray()
+        continueWatching(playlistId, ContinueSyncCodec.MAX_ENTRIES).forEach { item ->
+            ContinueSyncCodec.encode(item) { channel ->
+                if (channel.id > 0) stableMediaKey(channel.tvgId, channel.name, channel.group, channel.type.name) else null
+            }?.let(array::put)
+        }
+        return array
+    }
+
+    /**
+     * Applies incoming "Continuar a ver" entries that are newer than what this TV last
+     * watched. Episodes are rebuilt with this playlist's own source, so nothing received
+     * carries credentials; entries for another kind of source are ignored.
+     */
+    private fun applyContinueEntries(playlistId: Long, entries: org.json.JSONArray) {
+        val source = loadSource(playlistId)
+        val catalog by lazy { catalogByKey(playlistId) }
+        for (index in 0 until minOf(entries.length(), ContinueSyncCodec.MAX_ENTRIES)) {
+            val entry = entries.optJSONObject(index)?.let(ContinueSyncCodec::decode) ?: continue
+            val (channel, parent) = when (entry) {
+                is ContinueEntry.Catalog -> (catalog[entry.key] ?: continue) to null
+                is ContinueEntry.XtreamEpisode -> {
+                    if (source.type != SourceType.XTREAM) continue
+                    XtreamClient(source).episodeReference(
+                        episodeId = entry.episodeId,
+                        title = entry.title.ifBlank { "Episódio" },
+                        seasonLabel = entry.season.toString(),
+                        logo = entry.logo,
+                        url = ContinueSyncCodec.xtreamEpisodeUrl(entry.episodeId, entry.extension),
+                    ) to ContinueSyncCodec.xtreamSeriesReference(entry)
+                }
+                is ContinueEntry.StalkerEpisode -> {
+                    if (source.type != SourceType.STALKER) continue
+                    StalkerClient(source).episodeReference(
+                        entry.cmd, entry.episode, entry.season, entry.logo.ifBlank { entry.seriesLogo },
+                    ) to ContinueSyncCodec.stalkerSeriesReference(entry)
+                }
+            }
+            val key = playbackMediaKey(channel)
+            val playedAt = entry.playedAtMillis.takeIf { it > 0 } ?: System.currentTimeMillis()
+            val local = historyPlayedAt(playlistId, key)
+            if (local != null && local >= playedAt) continue
+            recordHistory(
+                playlistId = playlistId,
+                mediaKey = key,
+                channel = channel,
+                parent = parent,
+                subtitle = parent?.name ?: channel.group,
+                artwork = channel.logo.ifBlank { parent?.logo.orEmpty() },
+                upNext = entry.upNext,
+                playedAtMillis = playedAt,
+            )
+            if (!entry.upNext && entry.durationMs > 0) {
+                savePlaybackPosition(playlistId, key, entry.positionMs, entry.durationMs)
+            }
+        }
+    }
+
+    private fun catalogByKey(playlistId: Long): Map<String, Channel> {
+        val result = HashMap<String, Channel>()
+        readableDatabase.rawQuery(
+            """SELECT id, name, group_name, logo, tvg_id, stream_type, quality, favorite FROM channels
+               WHERE playlist_id = ? AND stream_type != 'LIVE'""".trimIndent(),
+            arrayOf(playlistId.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val channel = catalogChannel(cursor)
+                result[stableMediaKey(channel.tvgId, channel.name, channel.group, channel.type.name)] = channel
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun historyPlayedAt(playlistId: Long, mediaKey: String): Long? = readableDatabase.rawQuery(
+        "SELECT played_at FROM watch_history WHERE playlist_id = ? AND media_key = ?",
+        arrayOf(playlistId.toString(), mediaKey),
+    ).use { if (it.moveToFirst()) it.getLong(0) else null }
 
     private fun playlistValues(playlist: Playlist, source: SourceConfig, active: Boolean) = ContentValues().apply {
         put("name", playlist.name)

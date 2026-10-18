@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
@@ -19,38 +18,20 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from ..core.channel import Channel
 from ..core.content_types import LIVE, SERIES, VOD, content_type_for_stream
+from ..core.episodes import (
+    STALKER_EPISODE_SCHEME,
+    XTREAM_EPISODE_SCHEME,
+    parse_stalker_episode,
+    parse_xtream_episode,
+    stalker_episode_channel,
+)
 from ..player.pvr_recorder import PvrRecorderManager
 from .icons import icon
 from .video_osd import VideoOsd
 
-STALKER_EPISODE_SCHEME = "stalker-episode://"
 _REMINDER_LEAD = timedelta(minutes=1)
 _RECORDING_TAIL = timedelta(minutes=2)
 _NEXT_EPISODE_COUNTDOWN_S = 10
-
-
-def stalker_episode_channel(show: Channel, season: dict, episode) -> Channel:
-    """A replayable Channel for one Stalker episode (its link is resolved on play)."""
-    cmd = season.get("cmd", "")
-    season_name = season.get("name", "") or "Temporada"
-    return Channel(
-        name=f"{show.name} - {season_name} - Ep {episode}",
-        url=f"{STALKER_EPISODE_SCHEME}{quote(cmd, safe='')}?episode={quote(str(episode), safe='')}",
-        group=season_name,
-        logo=show.logo,
-        stream_type="series",
-        source="stalker",
-        tvg_id=f"stalker-episode:{cmd}#{episode}",
-        user_agent=show.user_agent,
-        referer=show.referer,
-    )
-
-
-def parse_stalker_episode(url: str) -> tuple[str, str]:
-    parsed = urlparse(url)
-    cmd = unquote(url[len(STALKER_EPISODE_SCHEME):].split("?", 1)[0])
-    episode = parse_qs(parsed.query).get("episode", [""])[0]
-    return cmd, episode
 
 
 def episode_index(episodes: list, channel: Channel) -> int:
@@ -240,6 +221,24 @@ class PremiumMixin:
                     dc_replace(channel, url=url), replay=channel, parent=show, auto_resume=auto_resume
                 ),
                 status_message="A obter link do episódio...",
+                context_playlist_id=playlist_id,
+            )
+            return
+        if channel.url.startswith(XTREAM_EPISODE_SCHEME):
+            playlist_id = self._current_playlist_id
+            episode_id, ext = parse_xtream_episode(channel.url)
+
+            def build():
+                return self._call_xtream(
+                    playlist_id, lambda parser: parser._build_stream_url(episode_id, "series", ext)
+                )
+
+            self._run_background(
+                build,
+                lambda url: self._play_channel(
+                    dc_replace(channel, url=url), replay=channel, parent=show, auto_resume=auto_resume
+                ),
+                status_message="A preparar o episódio...",
                 context_playlist_id=playlist_id,
             )
             return

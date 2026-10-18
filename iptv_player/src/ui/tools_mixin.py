@@ -66,7 +66,8 @@ class ToolsMixin:
             self,
             "Sincronizar TV",
             f"Importados {result['favorites']} favoritos e "
-            f"{result['progress']} pontos de retoma.",
+            f"{result['progress']} pontos de retoma e "
+            f"{result.get('continue', 0)} itens de Continuar a ver.",
         )
 
     @Slot()
@@ -141,8 +142,9 @@ class ToolsMixin:
                 "Sincronizar com a TV",
                 f"Sincronização concluída com {endpoint.label}.\n"
                 f"Recebidos da TV: {result.get('favorites', 0)} favoritos e "
-                f"{result.get('progress', 0)} pontos de retoma.\n"
-                "Os favoritos e pontos de retoma deste computador foram enviados para a TV.",
+                f"{result.get('progress', 0)} pontos de retoma e "
+                f"{result.get('continue', 0)} itens de Continuar a ver (inclui episódios).\n"
+                "O estado deste computador também foi enviado para a TV.",
             )
 
         self._run_background(

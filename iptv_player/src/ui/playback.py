@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QListWidgetItem, QMessageBox
 from ..core.channel import Channel
 from ..core.content_types import LIVE, SERIES, VOD, content_type_for_stream
 from ..core.diagnostics import diagnose_channel
-from .premium_mixin import stalker_episode_channel
+from ..core.episodes import stalker_episode_channel
 
 
 class PlaybackMixin:

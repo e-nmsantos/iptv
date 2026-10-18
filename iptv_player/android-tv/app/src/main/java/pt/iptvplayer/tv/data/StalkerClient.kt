@@ -39,16 +39,7 @@ class StalkerClient(private val source: SourceConfig) {
                 else -> raw?.toString().orEmpty().split(',', ';', ' ').filter(String::isNotBlank)
             }
             episodeValues.ifEmpty { listOf("1") }.forEach { episode ->
-                result += Channel(
-                    name = "S${seasonNumber.toString().padStart(2, '0')} E${episode.padStart(2, '0')}",
-                    url = "stalker-series://${JsonHttpClient.encode(cmd)}?episode=${JsonHttpClient.encode(episode)}",
-                    group = "Temporada $seasonNumber",
-                    logo = season.text("screenshot_uri"),
-                    tvgId = "stalker-episode:$cmd#$episode",
-                    type = StreamType.SERIES,
-                    userAgent = USER_AGENT,
-                    referer = "$portal/c/",
-                )
+                result += episodeReference(cmd, episode, seasonNumber, season.text("screenshot_uri"))
             }
         }
         return result
@@ -245,6 +236,18 @@ class StalkerClient(private val source: SourceConfig) {
             put("Referer", "$portal/c/")
             if (token.isNotBlank()) put("Authorization", "Bearer $token")
         },
+    )
+
+    /** One episode, resolved with `create_link` only when it is played. */
+    fun episodeReference(cmd: String, episode: String, seasonNumber: Int, logo: String) = Channel(
+        name = "S${seasonNumber.toString().padStart(2, '0')} E${episode.padStart(2, '0')}",
+        url = "stalker-series://${JsonHttpClient.encode(cmd)}?episode=${JsonHttpClient.encode(episode)}",
+        group = "Temporada $seasonNumber",
+        logo = logo,
+        tvgId = "$STALKER_EPISODE_PREFIX$cmd#$episode",
+        type = StreamType.SERIES,
+        userAgent = USER_AGENT,
+        referer = "$portal/c/",
     )
 
     companion object {

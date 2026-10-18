@@ -28,6 +28,9 @@ descreve apenas o estado atual.
   um minuto antes, por cima do catálogo ou do player.
 - Ecrã de Definições: descodificação, pausa em direto, estatísticas, próximo
   episódio automático e abrir no último canal.
+- Sincronização com o computador por PIN, nos dois sentidos: favoritos,
+  pontos de retoma e "Continuar a ver", incluindo episódios Xtream e Stalker
+  (reconstruídos com as credenciais de cada dispositivo; nada sai com URLs).
 
 ## 0.13.0-beta01
 

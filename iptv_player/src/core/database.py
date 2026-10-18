@@ -1245,6 +1245,7 @@ class DatabaseManager:
         channel: Channel,
         parent: Optional[Channel] = None,
         up_next: bool = False,
+        played_at: Optional[datetime] = None,
     ) -> None:
         """Remember a replayable channel as just watched (or queued as next episode).
 
@@ -1278,7 +1279,7 @@ class DatabaseManager:
                     self._encode_channel(channel),
                     self._encode_channel(parent),
                     1 if up_next else 0,
-                    datetime.now(timezone.utc).isoformat(),
+                    (played_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
                 ),
             )
             conn.execute(
@@ -1326,6 +1327,15 @@ class DatabaseManager:
                 "fraction": (position / length) if length > 0 else 0.0,
             })
         return items
+
+    def get_watch_played_at(self, playlist_id: int, media_key: str) -> Optional[datetime]:
+        """When ``media_key`` was last watched here, or None if never."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT played_at FROM watch_history WHERE playlist_id = ? AND media_key = ?",
+                (playlist_id, media_key),
+            ).fetchone()
+        return datetime.fromisoformat(row["played_at"]) if row else None
 
     def get_recent_live(self, playlist_id: int, limit: int = 15) -> list[Channel]:
         """Recently watched live channels, newest first."""

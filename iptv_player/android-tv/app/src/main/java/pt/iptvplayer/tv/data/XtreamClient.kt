@@ -89,19 +89,42 @@ class XtreamClient(private val config: SourceConfig) {
                 val title = item.text("title").ifBlank {
                     "S${seasonKey.padStart(2, '0')} E${episodeNumber.toString().padStart(2, '0')}"
                 }
-                result += Channel(
-                    name = title,
-                    url = streamUrl("series", id, item.text("container_extension").ifBlank { "mp4" }),
-                    group = "Temporada ${seasonKey.toIntOrNull() ?: seasonKey}",
+                result += episodeReference(
+                    episodeId = id,
+                    title = title,
+                    seasonLabel = (seasonKey.toIntOrNull() ?: seasonKey).toString(),
                     logo = item.optJSONObject("info")?.text("movie_image").orEmpty(),
-                    // Episode titles repeat across series ("S01 E01" / "Temporada 1"); the
-                    // provider's episode id keeps resume positions from colliding.
-                    tvgId = "xtream-episode:$id",
-                    type = StreamType.SERIES,
+                    url = streamUrl("series", id, item.text("container_extension").ifBlank { "mp4" }),
                 )
             }
         }
         return result
+    }
+
+    /**
+     * One episode as stored in history: [url] is the resolved stream, or for synced history an
+     * `xtream-episode://<id>?ext=` reference resolved by [episodeUrl] when played. Episode titles
+     * repeat across series, so the provider's episode id keeps resume positions apart.
+     */
+    fun episodeReference(
+        episodeId: String,
+        title: String,
+        seasonLabel: String,
+        logo: String,
+        url: String,
+    ) = Channel(
+        name = title,
+        url = url,
+        group = "Temporada $seasonLabel",
+        logo = logo,
+        tvgId = "$XTREAM_EPISODE_PREFIX$episodeId",
+        type = StreamType.SERIES,
+    )
+
+    /** Stream URL for an episode, using this playlist's own credentials. */
+    fun episodeUrl(episodeId: String, extension: String): String {
+        authenticate()
+        return streamUrl("series", episodeId, extension.ifBlank { "mp4" })
     }
 
     private fun authenticate() {

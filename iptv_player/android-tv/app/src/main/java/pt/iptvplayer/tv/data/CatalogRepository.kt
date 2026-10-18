@@ -7,7 +7,6 @@ import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URI
-import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -233,7 +232,11 @@ class CatalogRepository(
 
     suspend fun preparePlayback(channel: Channel): Channel = withContext(Dispatchers.IO) {
         val resolvedChannel = database.resolveChannel(channel)
-        val prepared = if (resolvedChannel.url.startsWith("stalker-")) {
+        val prepared = if (resolvedChannel.url.startsWith(ContinueSyncCodec.XTREAM_EPISODE_SCHEME)) {
+            // Episode received from the desktop: rebuilt with this playlist's own credentials.
+            val (episodeId, extension) = ContinueSyncCodec.parseXtreamEpisodeUrl(resolvedChannel.url)
+            resolvedChannel.copy(url = XtreamClient(currentSource).episodeUrl(episodeId, extension))
+        } else if (resolvedChannel.url.startsWith("stalker-")) {
             val client = StalkerClient(currentSource)
             resolvedChannel.copy(
                 url = client.resolve(resolvedChannel.url),
@@ -366,16 +369,7 @@ class CatalogRepository(
         return database.load(playlistId)
     }
 
-    private fun mediaKey(channel: Channel): String {
-        val stableIdentity = listOf(
-            channel.tvgId.ifBlank { channel.name },
-            channel.group,
-            channel.type.name,
-        ).joinToString("\u0000")
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(stableIdentity.toByteArray(Charsets.UTF_8))
-        return "media:" + digest.joinToString("") { "%02x".format(it) }
-    }
+    private fun mediaKey(channel: Channel): String = playbackMediaKey(channel)
 
     companion object {
         const val MAX_BYTES = 100L * 1024 * 1024
