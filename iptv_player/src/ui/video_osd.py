@@ -395,9 +395,15 @@ class VideoOsd(QObject):
         rect = self._video_rect()
         margin = 18
         width = max(320, rect.width() - 2 * margin)
-        self._banner.setFixedWidth(width)
-        self._banner.adjustSize()
-        self._banner.move(rect.left() + margin, rect.bottom() - self._banner.height() - margin)
+        # The description label word-wraps, so the height depends on the final width:
+        # size from heightForWidth instead of adjustSize(), which measured before
+        # wrapping and asked Windows for a window shorter than its own minimum.
+        layout = self._banner.layout()
+        layout.activate()
+        height = layout.totalHeightForWidth(width) if layout.hasHeightForWidth() else 0
+        height = max(height, layout.totalMinimumSize().height(), self._banner.sizeHint().height())
+        self._banner.setFixedSize(width, height)
+        self._banner.move(rect.left() + margin, rect.bottom() - height - margin)
 
     def _place_number(self) -> None:
         rect = self._video_rect()
