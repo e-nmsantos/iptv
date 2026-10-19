@@ -457,6 +457,12 @@ class PlayerWidget(QWidget):
         self._skip_back_btn.setVisible(not is_live)
         self._skip_forward_btn.setVisible(not is_live)
         self._progress_slider.setVisible(not is_live)
+        # A new item starts from zero: never leave the bar where the previous film was,
+        # and forget the last seek so the same spot can be chosen again.
+        self._progress_slider.setValue(0)
+        self._last_seek_value = -1
+        if not is_live:
+            self._time_label.setText("00:00 / --:--")
         self._live_paused_at = None
         self._behind_live_ms = 0
         if is_live:
@@ -590,9 +596,16 @@ class PlayerWidget(QWidget):
 
     @Slot(float)
     def _on_position_changed(self, position: float):
-        """Update progress slider."""
+        """Fallback for items whose duration VLC doesn't know yet.
+
+        VLC's fractional position is estimated from bytes read for HTTP VOD, so
+        it disagrees with the elapsed time; once the duration is known the bar
+        follows time / duration instead (see ``_on_time_changed``).
+        """
+        if self._stream_type == "live" or self._media_player.get_length() > 0:
+            return
         if not self._progress_slider.isSliderDown():
-            self._progress_slider.setValue(int(position * 1000))
+            self._progress_slider.setValue(int(max(0.0, min(1.0, position)) * 1000))
 
     @Slot(int)
     def _on_time_changed(self, time_ms: int):
@@ -601,8 +614,10 @@ class PlayerWidget(QWidget):
             return
         length = self._media_player.get_length()
         current = format_duration(time_ms // 1000)
-        total = format_duration(length // 1000) if length > 0 else "00:00"
+        total = format_duration(length // 1000) if length > 0 else "--:--"
         self._time_label.setText(f"{current} / {total}")
+        if length > 0 and not self._progress_slider.isSliderDown():
+            self._progress_slider.setValue(int(max(0, min(time_ms, length)) * 1000 // length))
 
     @Slot(str)
     def _on_state_changed(self, state: str):

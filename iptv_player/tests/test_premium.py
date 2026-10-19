@@ -258,3 +258,59 @@ class ContinueSyncTests(unittest.TestCase):
         tv.save_playback_progress(tv_id, received["channel"], 300_000, 1_800_000)
         self.assertEqual(import_device_state(tv, tv_id, export_device_state(pc, pc_id))["continue"], 0)
         self.assertFalse(tv.get_continue_watching(tv_id)[0]["up_next"])
+
+
+class ProgressBarTests(unittest.TestCase):
+    """The film progress bar follows elapsed time and restarts for each new item."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _widget(self):
+        from PySide6.QtCore import QObject, Signal
+
+        from src.ui.player_widget import PlayerWidget
+
+        class FakePlayer(QObject):
+            position_changed = Signal(float)
+            time_changed = Signal(int)
+            state_changed = Signal(str)
+            error_occurred = Signal(str)
+            recording_state_changed = Signal(bool, str)
+            stats_changed = Signal(dict)
+
+            def __init__(self):
+                super().__init__()
+                self.length = 0
+                self.is_playing = False
+                self.is_recording = False
+
+            def get_volume(self):
+                return 80
+
+            def get_length(self):
+                return self.length
+
+        player = FakePlayer()
+        widget = PlayerWidget(player)
+        self.addCleanup(widget.deleteLater)
+        return player, widget
+
+    def test_bar_follows_time_not_vlc_byte_position_and_resets_between_films(self):
+        player, widget = self._widget()
+        widget.set_stream_type("vod")
+        player.length = 5_566_000  # 01:32:46
+        player.time_changed.emit(5_000)
+        player.position_changed.emit(0.38)  # VLC's byte-based estimate for HTTP VOD
+        self.assertEqual(widget._progress_slider.value(), 0)
+        self.assertEqual(widget._time_label.text(), "00:05 / 01:32:46")
+
+        player.time_changed.emit(2_783_000)
+        self.assertEqual(widget._progress_slider.value(), 500)
+
+        widget.set_stream_type("vod")  # next film
+        self.assertEqual(widget._progress_slider.value(), 0)
+        self.assertEqual(widget._last_seek_value, -1)
