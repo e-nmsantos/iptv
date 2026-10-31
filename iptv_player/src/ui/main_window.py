@@ -86,6 +86,8 @@ class MainWindow(
         self._media_player = MediaPlayer(
             vlc_path=self._settings.get("vlc_path", ""),
             buffer_size_ms=self._settings.get("buffer_size_ms", 5000),
+            deinterlace=self._settings.get("deinterlace", False),
+            normalize_audio=self._settings.get("normalize_audio", True),
         )
         self._media_player.set_volume(self._settings.get("volume", 80))
         self._current_playlist_id: Optional[int] = None
@@ -959,6 +961,7 @@ class MainWindow(
         """Show settings dialog."""
         old_vlc_path = self._settings.get("vlc_path", "")
         old_buffer = self._settings.get("buffer_size_ms", 5000)
+        old_normalize = self._settings.get("normalize_audio", True)
         dialog = SettingsDialog(self._settings, self)
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
             return
@@ -968,14 +971,17 @@ class MainWindow(
         )
         new_vlc_path = self._settings.get("vlc_path", "")
         new_buffer = self._settings.get("buffer_size_ms", 5000)
+        new_normalize = self._settings.get("normalize_audio", True)
         try:
-            if new_vlc_path != old_vlc_path or new_buffer != old_buffer:
-                self._media_player.reinitialize(new_vlc_path, new_buffer)
+            if (new_vlc_path != old_vlc_path or new_buffer != old_buffer
+                    or new_normalize != old_normalize):
+                self._media_player.reinitialize(new_vlc_path, new_buffer, new_normalize)
                 self._media_player.set_video_widget(
                     self._player_widget.get_video_widget()
                 )
             else:
                 self._media_player.set_buffer_size(new_buffer)
+            self._media_player.set_deinterlace(self._settings.get("deinterlace", False))
             self.statusBar().showMessage("Definições aplicadas.")
         except Exception as exc:
             self._logger.error(f"Failed to apply player settings: {exc}")

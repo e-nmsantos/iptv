@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -42,7 +43,7 @@ def _fourcc_label(codec: int) -> str:
 
 
 def timeshift_directory() -> Path:
-    """Scratch folder VLC uses for paused live streams; emptied on start-up."""
+    """Root for private per-player scratch folders."""
     return Path(tempfile.gettempdir()) / "IPTVPlayer-timeshift"
 
 
@@ -67,6 +68,7 @@ class MediaPlayer(QObject):
     media_ended = Signal()
     recording_state_changed = Signal(bool, str)  # is_recording, path
     stats_changed = Signal(dict)  # bitrate_kbps, dropped_frames, buffering_events
+    timeshift_limit_reached = Signal()
 
     def __init__(
         self,
@@ -136,6 +138,10 @@ class MediaPlayer(QObject):
         self._retry_timer.setSingleShot(True)
         self._retry_timer.timeout.connect(self._retry_current_stream)
 
+        self._timeshift_timer = QTimer(self)
+        self._timeshift_timer.setInterval(5000)
+        self._timeshift_timer.timeout.connect(self._check_timeshift_storage)
+
         # Initialize VLC
         self._init_vlc(vlc_path)
 
@@ -157,12 +163,12 @@ class MediaPlayer(QObject):
             "--clock-synchro=0",
             "--cr-average=1000",
         ]
-        timeshift_dir = timeshift_directory()
+        timeshift_dir = None
         try:
-            timeshift_dir.mkdir(parents=True, exist_ok=True)
-            for leftover in timeshift_dir.glob("*"):
-                if leftover.is_file():
-                    leftover.unlink(missing_ok=True)
+            root = timeshift_directory()
+            root.mkdir(parents=True, exist_ok=True)
+            timeshift_dir = Path(tempfile.mkdtemp(prefix="player-", dir=root))
+            self._timeshift_dir = timeshift_dir
             vlc_args.extend([
                 f"--input-timeshift-path={timeshift_dir}",
                 f"--input-timeshift-granularity={_TIMESHIFT_GRANULARITY_BYTES}",
@@ -196,8 +202,29 @@ class MediaPlayer(QObject):
 
         if self._instance:
             self._player = self._instance.media_player_new()
+            self.set_deinterlace(getattr(self, "_deinterlace", False))
             if self._video_widget:
                 self._embed_video_widget(self._video_widget)
+        self._timeshift_timer.start()
+
+    def _check_timeshift_storage(self):
+        """Leave delayed live playback before its scratch space fills the disk."""
+        scratch = getattr(self, "_timeshift_dir", None)
+        if not scratch or not self._current_is_live:
+            return
+        try:
+            used = sum(path.stat().st_size for path in scratch.iterdir() if path.is_file())
+            if used and (used >= 2 * 1024**3 or shutil.disk_usage(scratch).free < 512 * 1024**2):
+                self.stop()
+                for path in scratch.iterdir():
+                    if path.is_file():
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            logger.debug("Timeshift file still in use")
+                self.timeshift_limit_reached.emit()
+        except OSError:
+            logger.debug("Unable to inspect timeshift storage")
 
     def _embed_video_widget(self, widget: QWidget):
         """Bind the VLC video output to a Qt widget for the current platform."""
@@ -325,8 +352,11 @@ class MediaPlayer(QObject):
             return
 
         if url:
+            if self._is_recording and not extra_sout and not self._retrying:
+                self._finish_recording_state()
             self._current_url = url
             if not self._retrying:
+                self._pause_after_start = False
                 self._retry_scheduled = False
                 self._retry_count = 0
                 self._stable_playback_ticks = 0
@@ -369,6 +399,8 @@ class MediaPlayer(QObject):
 
                 if extra_sout:
                     options.append(extra_sout)
+                elif self._retrying and self._is_recording:
+                    options.append(self._recording_sout)
 
                 media = self._instance.media_new(url)
                 for opt in (option for option in options if option):
@@ -407,7 +439,15 @@ class MediaPlayer(QObject):
         if self._player:
             self._player.stop()
             self._is_playing = False
+            self._finish_recording_state()
             self.state_changed.emit("stopped")
+
+    def _finish_recording_state(self):
+        if self._is_recording:
+            path = self._recording_path
+            self._is_recording = False
+            self._recording_path = ""
+            self.recording_state_changed.emit(False, path)
 
     def start_recording(self, output_path: str) -> bool:
         """Start duplicating the current live stream to a local file.
@@ -418,11 +458,11 @@ class MediaPlayer(QObject):
         """
         if not self._current_url or self._is_recording:
             return False
-        escaped_path = output_path.replace("\\", "/").replace(",", "\\,")
+        escaped_path = Path(output_path).resolve().as_posix().replace("'", "\\'")
         sout_option = (
-            f":sout=#duplicate{{s,dst=std{{access=file,mux=ts,dst={escaped_path}}}}}"
-            ":sout-keep"
+            f":sout=#duplicate{{dst=display,dst=std{{access=file{{append}},mux=ts,dst='{escaped_path}'}}}}"
         )
+        self._recording_sout = sout_option
         self._is_recording = True
         self._recording_path = output_path
         self.play(
@@ -495,17 +535,32 @@ class MediaPlayer(QObject):
             return max(500, self._buffer_size_ms)
         return self._buffer_size_ms
 
-    def reinitialize(self, vlc_path: str = "", buffer_size_ms: Optional[int] = None):
+    def reinitialize(
+        self, vlc_path: str = "", buffer_size_ms: Optional[int] = None,
+        normalize_audio: Optional[bool] = None,
+    ):
         """Recreate VLC so changed settings take effect immediately."""
         widget = self._video_widget
         volume = self._volume
+        paused = self._player is not None and self._player.get_state() == vlc.State.Paused
+        resume = bool(self._current_url and (self._is_playing or paused))
+        position_ms = max(0, int(self._player.get_time())) if resume else 0
         self.cleanup()
         if buffer_size_ms is not None:
             self.set_buffer_size(buffer_size_ms)
+        if normalize_audio is not None:
+            self._normalize_audio = bool(normalize_audio)
         self._init_vlc(vlc_path)
         if widget and self._player:
             self._embed_video_widget(widget)
         self.set_volume(volume)
+        if self._player:
+            self._player.audio_set_mute(self._muted)
+        if resume:
+            self.play(self._current_url, self._current_headers, is_live=self._current_is_live)
+            if not self._current_is_live and position_ms:
+                self.set_time(position_ms)
+            self._pause_after_start = paused
 
     def get_volume(self) -> int:
         """Get current volume."""
@@ -692,6 +747,8 @@ class MediaPlayer(QObject):
             return
 
         state = self._player.get_state()
+        previous_state = getattr(self, "_last_polled_state", None)
+        self._last_polled_state = state
         if state == vlc.State.Ended:
             if self._current_is_live:
                 self._on_error("A transmissão Live foi interrompida")
@@ -704,6 +761,12 @@ class MediaPlayer(QObject):
             return
         elif state == vlc.State.Playing:
             self._is_playing = True
+            if getattr(self, "_pause_after_start", False):
+                self._pause_after_start = False
+                self.pause()
+                return
+            if previous_state != state:
+                self.state_changed.emit("playing")
             self._buffering_ticks = 0
             self._stable_playback_ticks += 1
             # The retry budget belongs to one interruption. Restore it after
@@ -932,6 +995,7 @@ class MediaPlayer(QObject):
 
     def cleanup(self):
         """Clean up VLC resources."""
+        self._timeshift_timer.stop()
         self.stop()
         if self._player:
             self._player.release()
@@ -939,6 +1003,11 @@ class MediaPlayer(QObject):
             self._instance.release()
         self._player = None
         self._instance = None
+        scratch = getattr(self, "_timeshift_dir", None)
+        if (scratch is not None and scratch.resolve().parent == timeshift_directory().resolve()
+                and scratch.name.startswith("player-")):
+            shutil.rmtree(scratch, ignore_errors=True)
+            self._timeshift_dir = None
         if self._dll_directory_handle is not None:
             self._dll_directory_handle.close()
             self._dll_directory_handle = None

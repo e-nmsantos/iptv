@@ -2004,6 +2004,7 @@ class MediaPlayerTests(unittest.TestCase):
         player._current_url = ""
         player._current_headers = {}
         player._is_playing = False
+        player._is_recording = False
         player._retry_count = 0
         player._max_retries = 3
         player._retrying = False
@@ -2069,6 +2070,7 @@ class MediaPlayerTests(unittest.TestCase):
         player._buffer_size_ms = 1500
         player._video_widget = None
         player._dll_directory_handle = None
+        player._timeshift_timer = MagicMock()
         vlc_path = r"C:\Custom VLC\vlc.exe"
         vlc_dir = os.path.dirname(vlc_path)
 

@@ -236,3 +236,23 @@ Esta aplicação é um leitor: não fornece listas, contas ou conteúdos. Usa ap
 fontes para as quais tenhas autorização e respeita os direitos e condições do
 fornecedor. Não existe funcionalidade destinada a contornar autenticação ou
 restrições de acesso.
+
+## Afinação para uso pessoal
+
+- Em **Definições → Reprodução**, podes equilibrar o volume entre canais e
+  suavizar imagem entrelaçada. As opções são guardadas e aplicadas no arranque.
+  Alterar as definições do VLC mantém o ponto de retoma e o estado de pausa dos filmes.
+- A pausa em direto usa uma pasta temporária independente por player. A app
+  verifica o disco a cada cinco segundos e regressa ao direto ao atingir 2 GB
+  de dados temporários ou ficar com menos de 512 MB livres. Estes valores são
+  limiares de proteção, não uma quota rígida entre verificações.
+- As gravações agendadas usam o VLC para processar HLS e streams de vídeo,
+  em vez de guardar o manifesto M3U8. A indicação **A gravar** surge quando o
+  ficheiro começa a receber dados. Há até três tentativas de reconexão,
+  verificação de espaço livre e aviso de conclusão ou falha; os dados já
+  recebidos são preservados em caso de interrupção.
+- As gravações agendadas precisam da app aberta e do computador acordado.
+  Cada gravação em segundo plano abre uma ligação adicional ao fornecedor.
+- Capas partilhadas entre cartões e o destaque usam a mesma transferência.
+  Imagens indisponíveis têm um intervalo antes de nova tentativa, evitando
+  pedidos repetidos durante a navegação.

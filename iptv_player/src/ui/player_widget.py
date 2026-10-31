@@ -351,6 +351,14 @@ class PlayerWidget(QWidget):
         self._media_player.error_occurred.connect(self._on_error)
         self._media_player.recording_state_changed.connect(self._on_recording_state_changed)
         self._media_player.stats_changed.connect(self._on_stats_changed)
+        self._media_player.timeshift_limit_reached.connect(self._on_timeshift_limit)
+
+    def _on_timeshift_limit(self):
+        self.reset_live_offset()
+        self.go_live_requested.emit()
+        window = self.window()
+        if hasattr(window, "_show_toast"):
+            window._show_toast("Regressámos ao direto para proteger o espaço em disco.")
 
     def get_video_widget(self) -> QWidget:
         """Get the video frame widget for VLC output."""
@@ -630,8 +638,13 @@ class PlayerWidget(QWidget):
             self._channel_info.setStyleSheet(
                 f"color: {Palette.TEXT_MUTED}; font-size: 11px; padding: 2px 10px;"
             )
-        elif state in ("paused", "stopped"):
+        elif state == "paused":
             self._set_play_icon(False)
+            self._channel_info.setText(f"Em pausa: {self._channel_name}")
+        elif state == "stopped":
+            self._set_play_icon(False)
+            self.reset_live_offset()
+            self._channel_info.setText("Reprodução parada")
         elif state == "buffering":
             self._channel_info.setText("A estabilizar a transmissão…")
         elif state == "reconnecting":
@@ -664,12 +677,15 @@ class PlayerWidget(QWidget):
         if self._media_player.is_recording:
             self._media_player.stop_recording()
             return
-        folder = Path(
-            self._settings.get("recording_folder", "") if self._settings else ""
-        ) or Path.home() / "Videos" / "IPTV Recordings"
-        folder.mkdir(parents=True, exist_ok=True)
+        configured_folder = self._settings.get("recording_folder", "") if self._settings else ""
+        folder = Path(configured_folder) if configured_folder else Path.home() / "Videos" / "IPTV Recordings"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self._on_error("Não foi possível abrir a pasta de gravações.")
+            return
         safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in self._channel_name) or "gravacao"
-        filename = f"{safe_name}_{datetime.now():%Y%m%d_%H%M%S}.ts"
+        filename = f"{safe_name}_{datetime.now():%Y%m%d_%H%M%S_%f}.ts"
         self._media_player.start_recording(str(folder / filename))
 
     @Slot(bool, str)

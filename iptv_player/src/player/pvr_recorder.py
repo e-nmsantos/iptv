@@ -7,9 +7,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-import requests
+from PySide6.QtCore import QObject, Signal
 
 from ..utils.helpers import sanitize_filename
+from .recording_engine import record_stream
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class RecordingSession:
         headers: Optional[dict] = None,
         on_progress: Optional[Callable[[int, float], None]] = None,
         on_complete: Optional[Callable[[bool, str], None]] = None,
+        on_started: Optional[Callable[[], None]] = None,
     ):
         self.stream_url = stream_url
         self.output_file = output_file
@@ -32,6 +34,7 @@ class RecordingSession:
         self.headers = headers or {}
         self.on_progress = on_progress
         self.on_complete = on_complete
+        self.on_started = on_started
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -50,7 +53,7 @@ class RecordingSession:
     def elapsed_seconds(self) -> float:
         if self._start_time <= 0:
             return 0.0
-        return time.time() - self._start_time
+        return time.monotonic() - self._start_time
 
     def start(self) -> None:
         """Start capturing the stream in a background thread."""
@@ -63,52 +66,41 @@ class RecordingSession:
     def stop(self) -> None:
         """Signal the recording thread to finish gracefully."""
         self._stop_event.set()
-        if self._thread:
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
 
     def _record_worker(self) -> None:
-        self._start_time = time.time()
-        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        self._start_time = time.monotonic()
         success = False
         error_msg = ""
-
         try:
-            req_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) IPTVPlayer-PVR/1.0",
-                **self.headers,
-            }
-            with requests.get(
-                self.stream_url,
-                headers=req_headers,
-                stream=True,
-                timeout=15,
-            ) as response:
-                response.raise_for_status()
-                with open(self.output_file, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=64 * 1024):
-                        if self._stop_event.is_set():
-                            break
-                        if chunk:
-                            f.write(chunk)
-                            self._bytes_written += len(chunk)
-                            if self.on_progress:
-                                self.on_progress(self._bytes_written, self.elapsed_seconds)
-
-                        if self.duration_seconds > 0 and self.elapsed_seconds >= self.duration_seconds:
-                            break
-                success = True
-        except Exception as e:
-            error_msg = str(e)
-            logger.warning("PVR recording error: %s", e)
-
-        if self.on_complete:
-            self.on_complete(success, error_msg)
+            record_stream(self)
+            success = True
+        except Exception as exc:
+            error_msg = str(exc) if isinstance(exc, RuntimeError) else "Não foi possível gravar o canal. Verifica a ligação e a pasta de gravações."
+            logger.warning("PVR recording failed (%s)", type(exc).__name__)
+        finally:
+            try:
+                self._bytes_written = self.output_file.stat().st_size if self.output_file.exists() else 0
+                if not self._bytes_written:
+                    self.output_file.unlink(missing_ok=True)
+                    success = False
+                    error_msg = error_msg or "Não foram recebidos dados de vídeo."
+            except OSError:
+                success = False
+                error_msg = "Não foi possível verificar o ficheiro gravado."
+            if self.on_complete:
+                self.on_complete(success, error_msg)
 
 
-class PvrRecorderManager:
+class PvrRecorderManager(QObject):
     """Manages scheduled and instant background recordings."""
 
+    recording_started = Signal(str)
+    recording_finished = Signal(str, bool, str)
+
     def __init__(self, default_output_dir: Optional[Path] = None):
+        super().__init__()
         if default_output_dir is None:
             default_output_dir = Path.home() / "Videos" / "IPTV Recordings"
         self.output_dir = Path(default_output_dir)
@@ -122,6 +114,10 @@ class PvrRecorderManager:
         headers: Optional[dict] = None,
     ) -> RecordingSession:
         """Create and start a new background recording session."""
+        self._active_sessions = [
+            session for session in self._active_sessions
+            if session._thread is None or session.is_running
+        ]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         safe_name = sanitize_filename(channel_name) or "stream"
         out_path = self.output_dir / f"{safe_name}_{timestamp}.ts"
@@ -136,9 +132,11 @@ class PvrRecorderManager:
             output_file=out_path,
             duration_seconds=duration_seconds,
             headers=headers,
+            on_started=lambda: self.recording_started.emit(channel_name),
+            on_complete=lambda ok, message: self.recording_finished.emit(channel_name, ok, message),
         )
-        session.start()
         self._active_sessions.append(session)
+        session.start()
         return session
 
     def stop_all(self) -> None:

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QTabWidget,
@@ -397,11 +398,20 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
 
+        def add_tab(widget, title):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(widget)
+            tabs.addTab(scroll, title)
+
         # Player tab
         player_tab = QWidget()
         player_layout = QFormLayout(player_tab)
         
         self._vlc_path = QLineEdit()
+        self._vlc_path.setPlaceholderText("Detetado automaticamente")
         self._vlc_path.setText(self._settings.get("vlc_path", ""))
         vlc_browse = QPushButton("...")
         vlc_browse.setMaximumWidth(30)
@@ -409,18 +419,19 @@ class SettingsDialog(QDialog):
         vlc_layout = QHBoxLayout()
         vlc_layout.addWidget(self._vlc_path)
         vlc_layout.addWidget(vlc_browse)
-        player_layout.addRow("VLC Path:", vlc_layout)
+        player_layout.addRow("Localização do VLC:", vlc_layout)
 
         self._buffer_size = QSpinBox()
         self._buffer_size.setRange(300, 10000)
         self._buffer_size.setValue(self._settings.get("buffer_size_ms", 5000))
         self._buffer_size.setSuffix(" ms")
-        player_layout.addRow("Buffer:", self._buffer_size)
+        self._buffer_size.setToolTip("Uma reserva maior pode reduzir interrupções, mas torna a mudança de canal mais lenta.")
+        player_layout.addRow("Reserva de reprodução:", self._buffer_size)
 
         self._max_conn = QSpinBox()
         self._max_conn.setRange(1, 20)
         self._max_conn.setValue(self._settings.get("max_connections", 5))
-        player_layout.addRow("Max Ligações:", self._max_conn)
+        player_layout.addRow("Ligações simultâneas:", self._max_conn)
 
         self._recording_folder = QLineEdit()
         self._recording_folder.setText(self._settings.get("recording_folder", ""))
@@ -436,12 +447,19 @@ class SettingsDialog(QDialog):
         self._stream_overlay.setChecked(self._settings.get("stream_overlay_enabled", False))
         player_layout.addRow(self._stream_overlay)
 
-        self._auto_next = QCheckBox("Passar automaticamente para o próximo canal quando a stream falha")
+        self._normalize_audio = QCheckBox("Equilibrar o volume entre canais")
+        self._normalize_audio.setChecked(self._settings.get("normalize_audio", True))
+        player_layout.addRow(self._normalize_audio)
+        self._deinterlace = QCheckBox("Suavizar imagem entrelaçada (canais de televisão)")
+        self._deinterlace.setChecked(self._settings.get("deinterlace", False))
+        player_layout.addRow(self._deinterlace)
+
+        self._auto_next = QCheckBox("Mudar de canal automaticamente se a transmissão falhar")
         self._auto_next.setChecked(self._settings.get("auto_next_enabled", True))
         player_layout.addRow(self._auto_next)
 
         self._timeshift = QCheckBox(
-            "Pausa em direto: continuar a receber o canal enquanto está em pausa (usa espaço temporário em disco)"
+            "Permitir pausa em direto (até 2 GB; regressa ao direto se faltar espaço)"
         )
         self._timeshift.setChecked(self._settings.get("timeshift_enabled", True))
         player_layout.addRow(self._timeshift)
@@ -454,7 +472,7 @@ class SettingsDialog(QDialog):
         self._show_home.setChecked(self._settings.get("show_home_on_start", True))
         player_layout.addRow(self._show_home)
 
-        tabs.addTab(player_tab, "Player")
+        add_tab(player_tab, "Reprodução")
 
         # Network tab
         network_tab = QWidget()
@@ -464,7 +482,7 @@ class SettingsDialog(QDialog):
         self._timeout.setRange(5, 120)
         self._timeout.setValue(self._settings.get("network_timeout_seconds", 30))
         self._timeout.setSuffix(" s")
-        network_layout.addRow("Timeout:", self._timeout)
+        network_layout.addRow("Tempo limite de ligação:", self._timeout)
 
         self._user_agent = QLineEdit()
         self._user_agent.setText(self._settings.get("user_agent", ""))
@@ -475,7 +493,7 @@ class SettingsDialog(QDialog):
         self._update_url.setPlaceholderText("https://exemplo.com/manifest.json")
         network_layout.addRow("URL do manifesto de atualizações:", self._update_url)
 
-        tabs.addTab(network_tab, "Rede")
+        add_tab(network_tab, "Rede")
 
         # EPG tab
         epg_tab = QWidget()
@@ -491,7 +509,7 @@ class SettingsDialog(QDialog):
         self._epg_interval.setSuffix(" horas")
         epg_layout.addRow("Intervalo EPG:", self._epg_interval)
 
-        tabs.addTab(epg_tab, "EPG")
+        add_tab(epg_tab, "EPG")
 
         # Parental tab
         parental_tab = QWidget()
@@ -513,14 +531,14 @@ class SettingsDialog(QDialog):
         parental_layout.addWidget(self._pin_btn)
         parental_layout.addStretch()
 
-        tabs.addTab(parental_tab, "Parental")
+        add_tab(parental_tab, "Controlo parental")
 
         layout.addWidget(tabs)
 
         # Buttons
         buttons = QDialogButtonBox()
-        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.addButton(QDialogButtonBox.StandardButton.Ok).setText("Guardar")
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
         buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -566,6 +584,8 @@ class SettingsDialog(QDialog):
                 "epg_update_interval_hours": self._epg_interval.value(),
                 "recording_folder": self._recording_folder.text(),
                 "stream_overlay_enabled": self._stream_overlay.isChecked(),
+                "normalize_audio": self._normalize_audio.isChecked(),
+                "deinterlace": self._deinterlace.isChecked(),
                 "auto_next_enabled": self._auto_next.isChecked(),
                 "timeshift_enabled": self._timeshift.isChecked(),
                 "autoplay_next_episode": self._autoplay_next_episode.isChecked(),

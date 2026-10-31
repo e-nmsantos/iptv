@@ -62,6 +62,8 @@ class PremiumMixin:
         self._pvr = PvrRecorderManager(
             Path(self._settings.get("recording_folder", "") or Path.home() / "Videos" / "IPTV Recordings")
         )
+        self._pvr.recording_started.connect(self._on_background_recording_started)
+        self._pvr.recording_finished.connect(self._on_background_recording_finished)
         self._typed_digits = ""
         self._digit_timer = QTimer(self)
         self._digit_timer.setSingleShot(True)
@@ -538,10 +540,22 @@ class PremiumMixin:
             self._pvr.output_dir.mkdir(parents=True, exist_ok=True)
             seconds = max(60, int((stop - datetime.now(timezone.utc)).total_seconds()))
             self._pvr.start_recording(f"{target.name} - {title}", url, seconds, headers or None)
-            self._show_toast(f"⏺ A gravar: {title} ({seconds // 60} min)")
+            self._show_toast(f"A preparar gravação: {title} ({seconds // 60} min)")
 
         self._run_background(
             resolve, start,
             on_error=lambda message: self._show_toast(f"⚠ Gravação de {title} falhou: {message}"),
             use_semaphore=False,
         )
+
+    @Slot(str)
+    def _on_background_recording_started(self, title: str) -> None:
+        if not self._closing:
+            self._show_toast(f"⏺ A gravar: {title}")
+
+    @Slot(str, bool, str)
+    def _on_background_recording_finished(self, title: str, success: bool, message: str) -> None:
+        if not self._closing:
+            self._show_toast(
+                f"Gravação guardada: {title}" if success else f"Gravação de {title}: {message}"
+            )
