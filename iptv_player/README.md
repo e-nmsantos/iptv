@@ -37,6 +37,9 @@ Um player de IPTV moderno e completo feito em Python com PySide6 e VLC.
 - 📺 Sincronização de favoritos e pontos de retoma com a app Android TV, nos
   dois sentidos, pela rede local (**Playlists → Sincronizar com a TV**, com o
   PIN mostrado na TV)
+- 📤 Envio de todas as playlists M3U (por URL), Xtream e Stalker para a app
+  Android TV, com as credenciais (**Playlists → Enviar listas para a TV**, com o
+  mesmo PIN); listas abertas a partir de um ficheiro local não são enviadas
 
 ## 📋 Requisitos
 

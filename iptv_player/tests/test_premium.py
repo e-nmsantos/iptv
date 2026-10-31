@@ -186,6 +186,62 @@ class TvSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rede local"):
             exchange_with_tv(TvEndpoint("x", "8.8.8.8", 80), "123456", lambda state: "{}")
 
+    def test_playlists_for_tv_maps_sources_and_skips_local_files(self):
+        from src.core.tv_sync import playlists_for_tv
+
+        entries, skipped = playlists_for_tv([
+            {"name": "Lista", "source_type": "m3u_plus", "url": "https://host/list.m3u"},
+            {"name": "Ficheiro", "source_type": "m3u", "url": "", "file_path": "C:/lista.m3u"},
+            {"name": "Conta", "source_type": "xtream", "server_url": "http://x:8080",
+             "username": "u", "password": "p"},
+            {"name": "Portal", "source_type": "stalker", "server_url": "http://s/c/",
+             "mac_address": "00:1A:79:00:00:01"},
+            {"name": "Sem pass", "source_type": "xtream", "server_url": "http://x", "username": "u"},
+        ])
+        self.assertEqual(
+            entries,
+            [
+                {"source_type": "m3u", "name": "Lista", "url": "https://host/list.m3u"},
+                {"source_type": "xtream", "name": "Conta", "url": "http://x:8080",
+                 "username": "u", "password": "p"},
+                {"source_type": "stalker", "name": "Portal", "url": "http://s/c/",
+                 "mac": "00:1A:79:00:00:01"},
+            ],
+        )
+        self.assertEqual(skipped, ["Ficheiro", "Sem pass"])
+
+    def test_send_playlists_posts_json_batch_with_pin(self):
+        import json
+        from http.server import BaseHTTPRequestHandler
+        from urllib.parse import parse_qs
+
+        from src.core.tv_sync import TvEndpoint, send_playlists_to_tv
+
+        posted = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                posted["path"] = self.path
+                posted.update(parse_qs(self.rfile.read(length).decode()))
+                self.send_response(200 if self.path == "/sync/123456" else 403)
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+        endpoint = TvEndpoint("Sala", "127.0.0.1", self._serve(Handler))
+        entries = [{"source_type": "m3u", "name": "Ação", "url": "https://host/list.m3u"}]
+        send_playlists_to_tv(endpoint, "123456", entries)
+        self.assertEqual(posted["source_type"], ["playlists"])
+        self.assertEqual(json.loads(posted["playlists"][0]), entries)
+
+        with self.assertRaisesRegex(ValueError, "PIN incorreto"):
+            send_playlists_to_tv(endpoint, "654321", entries)
+        with self.assertRaisesRegex(ValueError, "Não há listas"):
+            send_playlists_to_tv(endpoint, "123456", [])
+
 
 class ContinueSyncTests(unittest.TestCase):
     """Episodes and films in "Continuar a ver" travel between devices without credentials."""
@@ -281,6 +337,7 @@ class ProgressBarTests(unittest.TestCase):
             error_occurred = Signal(str)
             recording_state_changed = Signal(bool, str)
             stats_changed = Signal(dict)
+            timeshift_limit_reached = Signal()
 
             def __init__(self):
                 super().__init__()

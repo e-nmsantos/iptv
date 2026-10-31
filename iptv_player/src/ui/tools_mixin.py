@@ -13,7 +13,13 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLineEdit
 
 from ..core.backup import create_backup, read_backup
 from ..core.device_sync import export_device_state, import_device_state
-from ..core.tv_sync import TvEndpoint, discover_tvs, exchange_with_tv
+from ..core.tv_sync import (
+    TvEndpoint,
+    discover_tvs,
+    exchange_with_tv,
+    playlists_for_tv,
+    send_playlists_to_tv,
+)
 
 
 class ToolsMixin:
@@ -78,21 +84,35 @@ class ToolsMixin:
             QMessageBox.information(self, "Sincronizar com a TV", "Seleciona primeiro uma playlist.")
             return
 
+        self._discover_tvs_then(
+            "Sincronizar com a TV",
+            lambda endpoint, pin: self._exchange_with_tv(playlist_id, endpoint, pin),
+        )
+
+    def _discover_tvs_then(self, title: str, continue_with) -> None:
+        """Browse the LAN for TVs, then ask which one and its PIN."""
+
         def discover():
             try:
                 return discover_tvs()
             except ImportError:
                 return []
 
+        def ask(tvs):
+            chosen = self._choose_tv_and_pin(title, tvs)
+            if chosen:
+                continue_with(*chosen)
+
         self._run_background(
             discover,
-            lambda tvs: self._ask_tv_and_pin(playlist_id, tvs),
-            on_error=lambda _message: self._ask_tv_and_pin(playlist_id, []),
+            ask,
+            on_error=lambda _message: ask([]),
             status_message="A procurar televisões na rede...",
             use_semaphore=False,
         )
 
-    def _ask_tv_and_pin(self, playlist_id: int, tvs: list) -> None:
+    def _choose_tv_and_pin(self, title: str, tvs: list):
+        """Ask for the TV (found or typed) and its PIN; ``None`` if cancelled."""
         instructions = (
             "Na TV abre Adicionar → Telemóvel ou computador: aparecem o PIN e o endereço."
         )
@@ -100,29 +120,77 @@ class ToolsMixin:
         if tvs:
             labels = [tv.label for tv in tvs] + ["Outra (escrever endereço)..."]
             choice, accepted = QInputDialog.getItem(
-                self, "Sincronizar com a TV", "Televisões encontradas na rede:", labels, 0, False
+                self, title, "Televisões encontradas na rede:", labels, 0, False
             )
             if not accepted:
-                return
+                return None
             if choice in labels[:-1]:
                 endpoint = tvs[labels.index(choice)]
         if endpoint is None:
             address, accepted = QInputDialog.getText(
-                self, "Sincronizar com a TV",
+                self, title,
                 f"{instructions}\n\nEndereço mostrado na TV (por exemplo 192.168.1.20:41234):",
             )
             if not accepted or not address.strip():
-                return
+                return None
             host, _, port = address.strip().removeprefix("http://").split("/")[0].partition(":")
             if not port.isdigit():
-                QMessageBox.warning(self, "Sincronizar com a TV", "Indica o endereço com a porta, como aparece na TV.")
-                return
+                QMessageBox.warning(self, title, "Indica o endereço com a porta, como aparece na TV.")
+                return None
             endpoint = TvEndpoint("TV", host, int(port))
         pin, accepted = QInputDialog.getText(
-            self, "Sincronizar com a TV", f"PIN de 6 algarismos mostrado em {endpoint.label}:",
+            self, title, f"PIN de 6 algarismos mostrado em {endpoint.label}:",
         )
         if not accepted or not pin.strip():
+            return None
+        return endpoint, pin
+
+    @Slot()
+    def _send_playlists_to_tv(self):
+        """Send every saved playlist (credentials included) to a TV on the home network."""
+        title = "Enviar listas para a TV"
+        playlists = self._db.get_playlists()
+        # The TV makes the last imported playlist active, so the current one goes last.
+        playlists.sort(key=lambda playlist: playlist.get("id") == self._current_playlist_id)
+        entries, skipped = playlists_for_tv(playlists)
+        if not entries:
+            QMessageBox.information(
+                self, title,
+                "Não há listas que a TV consiga carregar. As listas abertas a partir de um "
+                "ficheiro do computador não podem ser enviadas: usa o endereço (URL) da lista.",
+            )
             return
+        names = "\n".join(f"• {entry['name'] or entry['url']}" for entry in entries)
+        note = (
+            "\n\nNão enviadas (ficheiro local ou dados incompletos):\n"
+            + "\n".join(f"• {name}" for name in skipped)
+            if skipped else ""
+        )
+        answer = QMessageBox.question(
+            self, title,
+            f"Vão ser enviadas {len(entries)} listas para a TV, com as credenciais:\n"
+            f"{names}{note}\n\nO envio é feito pela rede local, protegido pelo PIN da TV. "
+            "Continuar?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def send(endpoint, pin):
+            self._run_background(
+                lambda: send_playlists_to_tv(endpoint, pin, entries),
+                lambda _result: QMessageBox.information(
+                    self, title,
+                    f"{len(entries)} listas enviadas para {endpoint.label}.\n"
+                    "A TV está a carregá-las; o progresso aparece no ecrã da TV.",
+                ),
+                on_error=lambda message: QMessageBox.warning(self, title, message),
+                status_message=f"A enviar listas para {endpoint.label}...",
+                use_semaphore=False,
+            )
+
+        self._discover_tvs_then(title, send)
+
+    def _exchange_with_tv(self, playlist_id: int, endpoint: TvEndpoint, pin: str) -> None:
 
         merged = {}
 
