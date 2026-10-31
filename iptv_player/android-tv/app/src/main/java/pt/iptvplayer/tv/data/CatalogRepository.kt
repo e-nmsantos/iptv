@@ -149,35 +149,59 @@ class CatalogRepository(
         SourceType.STALKER -> importStalker(currentSource.serverUrl, currentSource.macAddress)
     }
 
-    suspend fun importUrl(url: String): Playlist = withContext(Dispatchers.IO) {
-        val uri = runCatching { URI(url.trim()) }.getOrNull()
-        require(uri?.scheme in setOf("http", "https") && !uri?.host.isNullOrBlank()) {
-            "Introduz um endereço HTTP ou HTTPS válido."
-        }
-        val connection = uri!!.toURL().openConnection() as HttpURLConnection
+    suspend fun importUrl(url: String, customName: String? = null): Playlist = withContext(Dispatchers.IO) {
+        var currentUrl = url.trim()
+        var redirects = 0
+        var connection: HttpURLConnection? = null
         try {
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 30_000
-            connection.instanceFollowRedirects = true
-            connection.setRequestProperty("User-Agent", "IPTVPlayerTV/0.9")
-            connection.setRequestProperty("Accept-Encoding", "gzip")
-            connection.connect()
-            require(connection.responseCode in 200..299) { "O servidor respondeu com HTTP ${connection.responseCode}." }
-            val declared = connection.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
+            while (redirects < 5) {
+                val uri = runCatching { URI(currentUrl) }.getOrNull()
+                require(uri?.scheme in setOf("http", "https") && !uri?.host.isNullOrBlank()) {
+                    "Introduz um endereço HTTP ou HTTPS válido."
+                }
+                val conn = uri!!.toURL().openConnection() as HttpURLConnection
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 30_000
+                conn.instanceFollowRedirects = false
+                conn.setRequestProperty("User-Agent", "IPTVPlayerTV/0.9")
+                conn.setRequestProperty("Accept-Encoding", "gzip")
+                conn.connect()
+
+                val code = conn.responseCode
+                if (code in setOf(HttpURLConnection.HTTP_MOVED_PERM, HttpURLConnection.HTTP_MOVED_TEMP, HttpURLConnection.HTTP_SEE_OTHER, 307, 308)) {
+                    val location = conn.getHeaderField("Location")
+                    conn.disconnect()
+                    if (!location.isNullOrBlank()) {
+                        currentUrl = uri.resolve(location).toString()
+                        redirects++
+                        continue
+                    }
+                }
+                connection = conn
+                break
+            }
+            val finalConn = connection ?: error("Não foi possível estabelecer ligação.")
+            require(finalConn.responseCode in 200..299) { "O servidor respondeu com HTTP ${finalConn.responseCode}." }
+            val declared = finalConn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
             require(declared < 0 || declared <= MAX_BYTES) { "A lista excede o limite de 100 MB." }
-            val rawStream = LimitedInputStream(connection.inputStream, MAX_BYTES)
-            val sourceStream = if (connection.contentEncoding.equals("gzip", true)) {
+            val rawStream = LimitedInputStream(finalConn.inputStream, MAX_BYTES)
+            val sourceStream = if (finalConn.contentEncoding.equals("gzip", true)) {
                 GZIPInputStream(rawStream)
             } else {
                 rawStream
             }
-            val name = uri.path.substringAfterLast('/').substringBeforeLast('.').ifBlank { "Lista IPTV" }
+            val defaultName = runCatching { URI(currentUrl).path.substringAfterLast('/').substringBeforeLast('.') }.getOrNull()
+            val resolvedName = when {
+                !customName.isNullOrBlank() -> customName.trim()
+                !defaultName.isNullOrBlank() && defaultName != "get" -> defaultName
+                else -> "Lista IPTV"
+            }
             val source = SourceConfig(SourceType.M3U, url.trim())
             LimitedInputStream(sourceStream, MAX_DECOMPRESSED_BYTES).use { input ->
-                importM3uStream(input, name, source)
+                importM3uStream(input, resolvedName, source)
             }
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 
@@ -190,23 +214,27 @@ class CatalogRepository(
         } ?: error("Não foi possível abrir o ficheiro.")
     }
 
-    suspend fun importXtream(server: String, username: String, password: String): Playlist =
+    suspend fun importXtream(server: String, username: String, password: String, customName: String? = null): Playlist =
         withContext(Dispatchers.IO) {
             val source = SourceConfig(SourceType.XTREAM, XtreamClient.normalizeBaseUrl(server), username.trim(), password)
-            XtreamClient(source).loadCatalog().also {
+            val loaded = XtreamClient(source).loadCatalog()
+            val playlist = if (!customName.isNullOrBlank()) loaded.copy(name = customName.trim()) else loaded
+            playlist.also {
                 currentPlaylistId = database.save(it, source)
                 currentSource = source
             }
         }
 
-    suspend fun importStalker(portal: String, macAddress: String): Playlist =
+    suspend fun importStalker(portal: String, macAddress: String, customName: String? = null): Playlist =
         withContext(Dispatchers.IO) {
             val source = SourceConfig(
                 SourceType.STALKER,
                 StalkerClient.normalizePortal(portal),
                 macAddress = StalkerClient.normalizeMac(macAddress),
             )
-            StalkerClient(source).loadCatalog().also {
+            val loaded = StalkerClient(source).loadCatalog()
+            val playlist = if (!customName.isNullOrBlank()) loaded.copy(name = customName.trim()) else loaded
+            playlist.also {
                 currentPlaylistId = database.save(it, source)
                 currentSource = source
             }

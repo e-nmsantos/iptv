@@ -306,12 +306,31 @@ private fun CatalogScreen(
     // them on the "Adicionar" screen wondering whether it worked.
     var knownPlaylistCount by remember { mutableStateOf(state.playlists.size) }
     LaunchedEffect(state.playlists.size) {
-        if (state.playlists.size > knownPlaylistCount && destination == MainDestination.ADD) {
-            onDestinationChange(MainDestination.HOME)
+        if (state.playlists.size > knownPlaylistCount) {
+            if (showPairing) {
+                showPairing = false
+                onStopPairing()
+            }
+            if (destination == MainDestination.ADD) {
+                onDestinationChange(MainDestination.CATALOG)
+            }
         }
         knownPlaylistCount = state.playlists.size
     }
-    BackHandler(enabled = state.seriesTitle != null, onBack = onCloseSeries)
+    LaunchedEffect(state.pairingMessage) {
+        if (showPairing && state.pairingMessage?.contains("sucesso", ignoreCase = true) == true) {
+            delay(1200)
+            showPairing = false
+            onStopPairing()
+            onDestinationChange(MainDestination.CATALOG)
+        }
+    }
+    BackHandler(enabled = state.seriesTitle != null || destination != MainDestination.HOME) {
+        when {
+            state.seriesTitle != null -> onCloseSeries()
+            destination != MainDestination.HOME -> onDestinationChange(MainDestination.HOME)
+        }
+    }
     Row(Modifier.fillMaxSize().background(Background)) {
         NavigationSidebar(
             selected = state.selectedType,

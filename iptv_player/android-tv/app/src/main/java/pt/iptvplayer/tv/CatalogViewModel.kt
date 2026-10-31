@@ -92,13 +92,10 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
 
     fun selectGroup(group: String) {
         mutableState.update { it.copy(selectedGroup = group) }
-        loadCatalogPage(reset = true)
     }
 
     fun setQuery(query: String) {
         mutableState.update { it.copy(query = query, selectedGroup = "Todos") }
-        loadCatalogPage(reset = true)
-        mutableState.update { it.copy(query = query) }
     }
 
     fun loadNextCatalogPage() {
@@ -233,8 +230,12 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
             pairing.start(
                 exportData = exportData,
                 onPayload = { payload ->
-                    import(successPairingMessage = "Dados recebidos com sucesso.") {
-                        importPayload(payload)
+                    if (payload.type == PairingSourceType.PLAYLISTS) {
+                        importPlaylistBatch(payload.playlists)
+                    } else {
+                        import(successPairingMessage = "Dados recebidos com sucesso.") {
+                            importPayload(payload)
+                        }
                     }
                 },
                 onStatus = { status ->
@@ -355,11 +356,57 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
 
     private suspend fun importPayload(payload: PairingPayload): pt.iptvplayer.tv.model.Playlist =
         when (payload.type) {
-            PairingSourceType.M3U -> repository.importUrl(payload.serverUrl)
-            PairingSourceType.XTREAM -> repository.importXtream(payload.serverUrl, payload.username, payload.password)
-            PairingSourceType.STALKER -> repository.importStalker(payload.serverUrl, payload.macAddress)
+            PairingSourceType.M3U -> repository.importUrl(payload.serverUrl, payload.name.takeIf { it.isNotBlank() })
+            PairingSourceType.XTREAM -> repository.importXtream(payload.serverUrl, payload.username, payload.password, payload.name.takeIf { it.isNotBlank() })
+            PairingSourceType.STALKER -> repository.importStalker(payload.serverUrl, payload.macAddress, payload.name.takeIf { it.isNotBlank() })
             PairingSourceType.SYNC -> repository.importDeviceSync(payload.syncData)
+            PairingSourceType.PLAYLISTS -> error("Lote de listas tratado em importPlaylistBatch.")
         }
+
+    /**
+     * Imports the desktop's playlists one after another, showing progress on the pairing
+     * screen. One failing provider doesn't stop the rest; failures are listed at the end.
+     */
+    private fun importPlaylistBatch(entries: List<PairingPayload>) {
+        mutableState.update { it.copy(loading = true, error = null) }
+        viewModelScope.launch {
+            val failures = mutableListOf<String>()
+            var lastImported: pt.iptvplayer.tv.model.Playlist? = null
+            entries.forEachIndexed { index, entry ->
+                val label = entry.name.ifBlank { entry.serverUrl.substringAfter("://").substringBefore('/') }
+                mutableState.update {
+                    it.copy(pairingMessage = "A carregar lista ${index + 1} de ${entries.size}: $label…")
+                }
+                try {
+                    lastImported = importPayload(entry)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    failures += "$label: ${error.message ?: "erro desconhecido"}"
+                }
+            }
+            val imported = entries.size - failures.size
+            val playlist = lastImported
+            if (playlist == null) {
+                mutableState.update {
+                    it.copy(loading = false, pairingMessage = "Não foi possível importar: ${failures.joinToString("; ")}")
+                }
+                return@launch
+            }
+            requestedCatalogs.clear()
+            val message = if (failures.isEmpty()) {
+                "$imported ${if (imported == 1) "lista recebida" else "listas recebidas"} com sucesso."
+            } else {
+                "$imported de ${entries.size} listas carregadas."
+            }
+            applyPlaylist(playlist, repository.playlists(), message)
+            if (failures.isNotEmpty()) {
+                mutableState.update {
+                    it.copy(error = "Carregadas $imported de ${entries.size} listas. Falharam:\n" + failures.joinToString("\n"))
+                }
+            }
+        }
+    }
 
     private fun applyPlaylist(
         playlist: pt.iptvplayer.tv.model.Playlist,

@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import pt.iptvplayer.tv.data.DecoderPreference
+import pt.iptvplayer.tv.data.VideoSurface
 import pt.iptvplayer.tv.data.PlayerSettings
 import pt.iptvplayer.tv.data.TimeshiftBuffer
 
@@ -70,6 +71,15 @@ internal fun SettingsScreen(
                         "A duração depende da qualidade do canal.",
                 ) {
                     onUpdate { it.copy(timeshift = it.timeshift.next()) }
+                }
+            }
+            item {
+                SettingRow(
+                    title = "Superfície de vídeo",
+                    value = settings.videoSurface.label,
+                    description = settings.videoSurface.description,
+                ) {
+                    onUpdate { it.copy(videoSurface = it.videoSurface.next()) }
                 }
             }
             item {
@@ -175,6 +185,7 @@ private fun ShortcutLine(keys: String, action: String) {
 
 private fun onOff(value: Boolean) = if (value) "Ligado" else "Desligado"
 
+private fun VideoSurface.next() = VideoSurface.entries[(ordinal + 1) % VideoSurface.entries.size]
 private fun DecoderPreference.next() = DecoderPreference.entries[(ordinal + 1) % DecoderPreference.entries.size]
 
 private fun TimeshiftBuffer.next() = TimeshiftBuffer.entries[(ordinal + 1) % TimeshiftBuffer.entries.size]

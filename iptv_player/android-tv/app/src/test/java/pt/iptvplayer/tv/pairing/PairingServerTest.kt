@@ -123,6 +123,78 @@ class PairingServerTest {
     }
 
     @Test
+    fun `desktop sends a batch of playlists with the pin`() {
+        val received = mutableListOf<PairingPayload>()
+        val latch = CountDownLatch(1)
+        val server = PairingServer(InetAddress.getLoopbackAddress())
+        try {
+            val session = server.start(onPayloadReceived = { received += it; latch.countDown() })
+            val batch = """[
+                {"source_type":"m3u","name":"Lista","url":"https://host/list.m3u"},
+                {"source_type":"xtream","name":"Conta","url":"http://x:8080","username":"u","password":"p&=%"},
+                {"source_type":"stalker","name":"Portal","url":"http://s/c/","mac":"00:1A:79:00:00:01"},
+                {"source_type":"xtream","name":"Sem pass","url":"http://x","username":"u"},
+                {"source_type":"sync","sync_data":"{}"}
+            ]"""
+            val post = URL("http://127.0.0.1:${session.port}/sync/${session.pin}").openConnection() as HttpURLConnection
+            post.requestMethod = "POST"
+            post.doOutput = true
+            post.outputStream.use {
+                it.write(("source_type=playlists&playlists=" + URLEncoder.encode(batch, StandardCharsets.UTF_8.name())).toByteArray())
+            }
+            assertEquals(200, post.responseCode)
+            assertTrue(latch.await(2, TimeUnit.SECONDS))
+            val payload = received.single()
+            assertEquals(PairingSourceType.PLAYLISTS, payload.type)
+            assertEquals(
+                listOf(
+                    PairingPayload(PairingSourceType.M3U, "https://host/list.m3u", name = "Lista"),
+                    PairingPayload(PairingSourceType.XTREAM, "http://x:8080", "u", "p&=%", name = "Conta"),
+                    PairingPayload(PairingSourceType.STALKER, "http://s/c/", macAddress = "00:1A:79:00:00:01", name = "Portal"),
+                ),
+                payload.playlists,
+            )
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun `playlist batch without valid entries is rejected`() {
+        val server = PairingServer(InetAddress.getLoopbackAddress())
+        try {
+            val session = server.start(onPayloadReceived = {})
+            val post = URL("http://127.0.0.1:${session.port}/sync/${session.pin}").openConnection() as HttpURLConnection
+            post.requestMethod = "POST"
+            post.doOutput = true
+            post.outputStream.use { it.write("source_type=playlists&playlists=not-json".toByteArray()) }
+            assertEquals(400, post.responseCode)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun `malformed form escapes are rejected and the session keeps working`() {
+        val received = mutableListOf<PairingPayload>()
+        val server = PairingServer(InetAddress.getLoopbackAddress())
+        try {
+            val session = server.start(onPayloadReceived = { received += it })
+            val post = URL(session.url).openConnection() as HttpURLConnection
+            post.requestMethod = "POST"
+            post.doOutput = true
+            post.outputStream.use { it.write("source_type=m3u&url=https%3A%2F%2Fhost%zz".toByteArray()) }
+            assertEquals(400, post.responseCode)
+
+            val get = URL(session.url).openConnection() as HttpURLConnection
+            assertEquals(200, get.responseCode)
+            assertTrue(received.isEmpty())
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
     fun `five wrong pins close the pairing session`() {
         val server = PairingServer(InetAddress.getLoopbackAddress())
         try {

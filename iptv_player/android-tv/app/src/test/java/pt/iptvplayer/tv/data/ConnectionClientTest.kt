@@ -76,6 +76,26 @@ class ConnectionClientTest {
             server.close()
         }
     }
+
+    @Test
+    fun `broken xtream series endpoint still imports live and vod`() {
+        val server = FakeXtreamServer { action, port ->
+            when (action) {
+                "get_live_categories", "get_vod_categories" -> "[]"
+                "get_series_categories", "get_series" -> "<html>500 Internal Server Error</html>"
+                "get_live_streams" -> """[{"stream_id":10,"name":"Canal","category_name":"TV"}]"""
+                "get_vod_streams" -> """[{"stream_id":20,"name":"Filme","category_name":"Filmes"}]"""
+                else -> """{"user_info":{"auth":1},"server_info":{"url":"127.0.0.1","server_protocol":"http","port":"$port"}}"""
+            }
+        }
+        try {
+            val source = SourceConfig(SourceType.XTREAM, "http://127.0.0.1:${server.port}", "user", "pass")
+            val catalog = XtreamClient(source).loadCatalog()
+            assertEquals(listOf(StreamType.LIVE, StreamType.VOD), catalog.channels.map { it.type })
+        } finally {
+            server.close()
+        }
+    }
 }
 
 private class FakeXtreamServer(

@@ -173,10 +173,15 @@ fun buildPlayerSession(
         .setEnableDecoderFallback(true)
     logDecodersOnce
     val stats = StreamStatsCollector(bandwidthMeter)
+    val audioAttributes = androidx.media3.common.AudioAttributes.Builder()
+        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+        .setUsage(C.USAGE_MEDIA)
+        .build()
     val player = ExoPlayer.Builder(context, renderersFactory)
         .setMediaSourceFactory(mediaSourceFactory)
         .setBandwidthMeter(bandwidthMeter)
         .setLoadControl(loadControl)
+        .setAudioAttributes(audioAttributes, true)
         .build()
         .apply {
             addAnalyticsListener(stats)

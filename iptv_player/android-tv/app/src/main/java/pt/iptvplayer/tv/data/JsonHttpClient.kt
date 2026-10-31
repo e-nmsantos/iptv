@@ -22,31 +22,55 @@ internal class JsonHttpClient(
     }
 
     private fun request(url: String, method: String, body: String?): String {
-        val uri = URI(url)
-        require(uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()) { "Endereço de servidor inválido." }
-        val connection = uri.toURL().openConnection() as HttpURLConnection
+        var currentUrl = url
+        var currentMethod = method
+        var currentBody = body
+        var redirects = 0
+        var connection: HttpURLConnection? = null
         try {
-            connection.requestMethod = method
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 35_000
-            connection.instanceFollowRedirects = true
-            connection.setRequestProperty("User-Agent", userAgent)
-            connection.setRequestProperty("Accept", "application/json, text/plain, */*")
-            connection.setRequestProperty("Accept-Encoding", "gzip")
-            for ((key, value) in defaultHeaders) connection.setRequestProperty(key, value)
-            if (body != null) {
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
-                connection.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
+            while (redirects < 5) {
+                val uri = URI(currentUrl)
+                require(uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()) { "Endereço de servidor inválido." }
+                val conn = uri.toURL().openConnection() as HttpURLConnection
+                conn.requestMethod = currentMethod
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 35_000
+                conn.instanceFollowRedirects = false
+                conn.setRequestProperty("User-Agent", userAgent)
+                conn.setRequestProperty("Accept", "application/json, text/plain, */*")
+                conn.setRequestProperty("Accept-Encoding", "gzip")
+                for ((key, value) in defaultHeaders) conn.setRequestProperty(key, value)
+                if (currentBody != null) {
+                    conn.doOutput = true
+                    conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+                    conn.outputStream.use { it.write(currentBody.toByteArray(StandardCharsets.UTF_8)) }
+                }
+                val code = conn.responseCode
+                if (code in setOf(HttpURLConnection.HTTP_MOVED_PERM, HttpURLConnection.HTTP_MOVED_TEMP, HttpURLConnection.HTTP_SEE_OTHER, 307, 308)) {
+                    val location = conn.getHeaderField("Location")
+                    conn.disconnect()
+                    if (!location.isNullOrBlank()) {
+                        currentUrl = uri.resolve(location).toString()
+                        if (code == HttpURLConnection.HTTP_SEE_OTHER) {
+                            currentMethod = "GET"
+                            currentBody = null
+                        }
+                        redirects++
+                        continue
+                    }
+                }
+                connection = conn
+                break
             }
-            val status = connection.responseCode
-            val raw = if (status in 200..299) connection.inputStream else connection.errorStream
-            val stream = if (raw != null && connection.contentEncoding.equals("gzip", true)) GZIPInputStream(raw) else raw
+            val finalConn = connection ?: error("Não foi possível estabelecer ligação.")
+            val status = finalConn.responseCode
+            val raw = if (status in 200..299) finalConn.inputStream else finalConn.errorStream
+            val stream = if (raw != null && finalConn.contentEncoding.equals("gzip", true)) GZIPInputStream(raw) else raw
             val response = stream?.use(::readBounded).orEmpty()
             require(status in 200..299) { "O servidor respondeu com HTTP $status." }
             return response
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 

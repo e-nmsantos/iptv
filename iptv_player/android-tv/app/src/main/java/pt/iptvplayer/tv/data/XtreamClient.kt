@@ -2,7 +2,9 @@ package pt.iptvplayer.tv.data
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import pt.iptvplayer.tv.model.Channel
 import pt.iptvplayer.tv.model.Playlist
 import pt.iptvplayer.tv.model.StreamType
@@ -29,13 +31,21 @@ class XtreamClient(private val config: SourceConfig) {
         val liveItems: JSONArray
         val vodItems: JSONArray
         val seriesItems: JSONArray
+        // Live channels are required. Several providers return errors or HTML from the
+        // category, VOD or series endpoints; those just come back empty so the live list
+        // still imports (a later playlist refresh retries them).
+        fun <T> optional(task: Future<T>, fallback: T): T = runCatching { task.get() }.getOrDefault(fallback)
         try {
-            liveCategories = liveCategoriesTask.get()
-            vodCategories = vodCategoriesTask.get()
-            seriesCategories = seriesCategoriesTask.get()
-            liveItems = liveTask.get()
-            vodItems = vodTask.get()
-            seriesItems = seriesTask.get()
+            liveItems = try {
+                liveTask.get()
+            } catch (error: ExecutionException) {
+                throw error.cause ?: error
+            }
+            liveCategories = optional(liveCategoriesTask, emptyMap())
+            vodCategories = optional(vodCategoriesTask, emptyMap())
+            seriesCategories = optional(seriesCategoriesTask, emptyMap())
+            vodItems = optional(vodTask, JSONArray())
+            seriesItems = optional(seriesTask, JSONArray())
         } finally {
             executor.shutdownNow()
         }

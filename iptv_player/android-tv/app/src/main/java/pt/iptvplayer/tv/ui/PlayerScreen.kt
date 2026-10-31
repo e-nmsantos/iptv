@@ -25,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +42,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -56,6 +60,7 @@ import kotlinx.coroutines.delay
 import pt.iptvplayer.tv.R
 import pt.iptvplayer.tv.data.DecoderPreference
 import pt.iptvplayer.tv.data.PlayerSettings
+import pt.iptvplayer.tv.data.VideoSurface
 import pt.iptvplayer.tv.model.Channel
 import pt.iptvplayer.tv.model.EpgProgram
 import pt.iptvplayer.tv.model.EpgReminder
@@ -358,6 +363,41 @@ fun PlayerScreen(
             player.release()
         }
     }
+    // Leaving the app (Home, input switch) must not keep streaming behind the launcher.
+    // Live channels drop the connection and rejoin "now" on return; VOD pauses in place.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, player) {
+        var stoppedInBackground = false
+        var resumeOnStart = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    resumeOnStart = player.playWhenReady
+                    if (isLive) {
+                        player.stop()
+                        stoppedInBackground = true
+                    } else {
+                        onSaveProgress(channel, player.currentPosition.coerceAtLeast(0), player.duration.coerceAtLeast(0))
+                        player.pause()
+                    }
+                }
+                Lifecycle.Event.ON_START -> {
+                    if (stoppedInBackground) {
+                        stoppedInBackground = false
+                        behindLiveMs = 0
+                        liveBaselineOffsetMs = null
+                        livePausedAt = if (resumeOnStart) null else SystemClock.elapsedRealtime()
+                        player.prepare()
+                    }
+                    if (resumeOnStart) player.play()
+                    resumeOnStart = false
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     // Live reconnection watchdog.
     LaunchedEffect(player, channel.url) {
         if (!isLive) return@LaunchedEffect
@@ -521,11 +561,16 @@ fun PlayerScreen(
         },
     ) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView(
+            // The surface type is fixed at inflation, so a change rebuilds the view.
+            key(settings.videoSurface) { AndroidView(
                 factory = { viewContext ->
                     val inflationParent = FrameLayout(viewContext)
+                    val layout = when (settings.videoSurface) {
+                        VideoSurface.TEXTURE -> R.layout.player_view_texture
+                        VideoSurface.SURFACE -> R.layout.player_view_surface
+                    }
                     (LayoutInflater.from(viewContext).inflate(
-                        R.layout.player_view_texture, inflationParent, false,
+                        layout, inflationParent, false,
                     ) as PlayerView).apply {
                         this.player = player
                     }
@@ -538,7 +583,7 @@ fun PlayerScreen(
                     if (!guideVisible && !controlsVisible && !nextCardVisible && dueReminder == null) view.requestFocus()
                 },
                 modifier = Modifier.fillMaxSize(),
-            )
+            ) }
             if (((buffering && !hasPlayed) || notice != null) && playbackError == null) {
                 Text(
                     notice ?: "A ligar ao canal…",

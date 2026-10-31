@@ -18,12 +18,19 @@ enum class TimeshiftBuffer(val megabytes: Int, val label: String) {
     LARGE(256, "256 MB (≈ 8–16 min)"),
 }
 
+/** How the video is composited. SurfaceView is lighter and allows HDR; TextureView is the proven default. */
+enum class VideoSurface(val label: String, val description: String) {
+    TEXTURE("Compatível", "TextureView: funciona em todas as boxes. Usa mais GPU e não suporta HDR."),
+    SURFACE("Desempenho", "SurfaceView: mais leve em 4K e 50/60 fps e permite HDR. Volta a Compatível se vires ecrã preto."),
+}
+
 data class PlayerSettings(
     val decoder: DecoderPreference = DecoderPreference.AUTO,
     val timeshift: TimeshiftBuffer = TimeshiftBuffer.MEDIUM,
     val autoplayNextEpisode: Boolean = true,
     val resumeLastChannelOnStart: Boolean = false,
     val showStreamStats: Boolean = false,
+    val videoSurface: VideoSurface = VideoSurface.TEXTURE,
 )
 
 /** Small, synchronous preference store; every write is published through [settings]. */
@@ -40,6 +47,7 @@ class PlayerPreferences(context: Context) {
             .putBoolean(KEY_AUTOPLAY_NEXT, next.autoplayNextEpisode)
             .putBoolean(KEY_RESUME_LAST, next.resumeLastChannelOnStart)
             .putBoolean(KEY_STATS, next.showStreamStats)
+            .putString(KEY_VIDEO_SURFACE, next.videoSurface.name)
             .apply()
         mutableSettings.value = next
     }
@@ -50,6 +58,7 @@ class PlayerPreferences(context: Context) {
         autoplayNextEpisode = preferences.getBoolean(KEY_AUTOPLAY_NEXT, true),
         resumeLastChannelOnStart = preferences.getBoolean(KEY_RESUME_LAST, false),
         showStreamStats = preferences.getBoolean(KEY_STATS, false),
+        videoSurface = enumOrDefault(preferences.getString(KEY_VIDEO_SURFACE, null), VideoSurface.TEXTURE),
     )
 
     private inline fun <reified T : Enum<T>> enumOrDefault(value: String?, default: T): T =
@@ -61,5 +70,6 @@ class PlayerPreferences(context: Context) {
         const val KEY_AUTOPLAY_NEXT = "autoplay_next_episode"
         const val KEY_RESUME_LAST = "resume_last_channel"
         const val KEY_STATS = "show_stream_stats"
+        const val KEY_VIDEO_SURFACE = "video_surface"
     }
 }

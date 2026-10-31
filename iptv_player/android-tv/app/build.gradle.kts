@@ -54,6 +54,9 @@ android {
 
     buildTypes {
         release {
+            // Personal sideload build: signed with the local debug key so it installs over
+            // the existing debug APK without wiping playlists, favourites or resume points.
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -103,7 +106,9 @@ dependencies {
     // which many Android TV boxes lack in hardware. Version must track Media3 above.
     implementation("io.github.anilbeesetti:nextlib-media3ext:1.11.0-0.15.0")
     implementation("com.google.zxing:core:3.5.4")
-    implementation("org.json:json:20260719")
+    // Android ships org.json; the jar is only for JVM unit tests. Bundling it in the app
+    // would let R8 rename methods the framework copy (loaded first at runtime) doesn't have.
+    testImplementation("org.json:json:20260719")
     // Coil 3.5 is built with Kotlin 2.4; keep 3.4 until the project compiler is upgraded.
     //noinspection NewerVersionAvailable
     implementation("io.coil-kt.coil3:coil-compose:3.4.0")
