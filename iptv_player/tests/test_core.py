@@ -1415,6 +1415,29 @@ class DiagnosticTests(unittest.TestCase):
         request.assert_not_called()
         self.assertEqual(result["protocol"], "UDP")
 
+    def test_failure_explanations_separate_account_refusals_from_channel_faults(self):
+        from src.core.diagnostics import explain_failure
+
+        for status in ("HTTP 401", "HTTP 403", "HTTP 407", "HTTP 506"):
+            reason, account_level = explain_failure({"status": status})
+            self.assertIn(status.split()[1], reason)
+            self.assertTrue(account_level, status)
+        for status, fragment in (
+            ("HTTP 503", "eventos"),
+            ("HTTP 404", "já não existe"),
+            ("ConnectTimeout", "não responde"),
+            ("ConnectionError", "não responde"),
+            ("ReadTimeout", "não enviou vídeo"),
+        ):
+            reason, account_level = explain_failure({"status": status})
+            self.assertIn(fragment, reason)
+            self.assertFalse(account_level, status)
+        # A healthy server means the problem is in the stream, not the provider.
+        self.assertEqual(explain_failure({"status": "HTTP 200"}), ("", False))
+        self.assertEqual(explain_failure({"status": "protocolo suportado pelo VLC"}), ("", False))
+        reason, _ = explain_failure({"status": "ConnectionError", "resolve_error": "sem link"})
+        self.assertIn("portal não devolveu", reason)
+
 
 class ParserTests(unittest.TestCase):
     def test_infer_stream_type_uses_explicit_metadata_and_patterns(self):

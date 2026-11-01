@@ -256,6 +256,7 @@ class PlayerWidget(QWidget):
         error_layout.setSpacing(8)
 
         self._error_banner_text = QLabel("⚠ Falha na reprodução.")
+        self._error_banner_text.setWordWrap(True)
         self._error_banner_text.setStyleSheet(
             f"color: {Palette.WARNING_AMBER}; font-weight: 600; font-size: 11px;"
         )
@@ -484,17 +485,42 @@ class PlayerWidget(QWidget):
     def show_error_banner(self, message: str, is_live: bool = True):
         """Show the error banner with automatic countdown for live channels."""
         self._error_countdown_timer.stop()
+        self._error_message = message
+        self._error_reason = ""
+        self._error_is_live = is_live
         if is_live:
             self._countdown_remaining = 5
             self._next_banner_btn.show()
-            self._error_banner_text.setText(
-                f"⚠ Falha na transmissão. A mudar para o canal seguinte em {self._countdown_remaining}s..."
-            )
             self._error_countdown_timer.start()
         else:
             self._next_banner_btn.hide()
-            self._error_banner_text.setText(f"⚠ Falha na reprodução: {message}")
+            self._countdown_remaining = 0
+        self._refresh_error_banner_text()
         self._error_banner.show()
+
+    def set_error_reason(self, reason: str, stop_auto_next: bool = False):
+        """Add the provider's reason to the visible error banner.
+
+        ``stop_auto_next`` cancels the countdown: when the provider refuses the
+        whole account, the next channel would fail the same way.
+        """
+        if self._error_banner.isHidden():
+            return
+        self._error_reason = reason
+        if stop_auto_next and self._error_countdown_timer.isActive():
+            self._error_countdown_timer.stop()
+            self._countdown_remaining = 0
+        self._refresh_error_banner_text()
+
+    def _refresh_error_banner_text(self):
+        if self._countdown_remaining > 0:
+            text = f"⚠ Falha na transmissão. A mudar para o canal seguinte em {self._countdown_remaining}s..."
+        elif getattr(self, "_error_is_live", False):
+            text = "⚠ Falha na transmissão."
+        else:
+            text = f"⚠ Falha na reprodução: {getattr(self, '_error_message', '')}"
+        reason = getattr(self, "_error_reason", "")
+        self._error_banner_text.setText(f"{text}\n{reason}" if reason else text)
 
     def _on_error_countdown_tick(self):
         self._countdown_remaining -= 1
@@ -503,9 +529,7 @@ class PlayerWidget(QWidget):
             self._error_banner.hide()
             self.next_channel_requested.emit()
         else:
-            self._error_banner_text.setText(
-                f"⚠ Falha na transmissão. A mudar para o canal seguinte em {self._countdown_remaining}s..."
-            )
+            self._refresh_error_banner_text()
 
     def _on_retry_clicked(self):
         self._error_countdown_timer.stop()

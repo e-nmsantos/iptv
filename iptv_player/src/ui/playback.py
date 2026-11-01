@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QListWidgetItem, QMessageBox
 
 from ..core.channel import Channel
 from ..core.content_types import LIVE, SERIES, VOD, content_type_for_stream
-from ..core.diagnostics import diagnose_channel
+from ..core.diagnostics import diagnose_channel, explain_failure
 from ..core.episodes import stalker_episode_channel
 
 
@@ -470,34 +470,73 @@ class PlaybackMixin:
         except Exception:
             return None
 
+    def _probe_channel(self, channel, playlist_id, timeout: int) -> dict:
+        """Test a channel over HTTP, resolving a fresh Stalker link first.
+
+        Runs on a worker thread. A failed Stalker resolution is reported as
+        ``resolve_error`` instead of probing the unusable localhost command.
+        """
+        ch = channel
+        resolve_error = ""
+        if ch.source == "stalker" and playlist_id:
+            url_lower = (ch.url or "").lower()
+            if (
+                not url_lower.startswith(("http://", "https://", "rtmp://", "rtsp://", "udp://", "rtp://"))
+                or "localhost" in url_lower
+                or "127.0.0.1" in url_lower
+            ):
+                try:
+                    resolved_url = self._call_stalker(
+                        playlist_id,
+                        lambda parser: parser.resolve_live_link(ch.url or ch.tvg_id or str(getattr(ch, "id", "") or "")),
+                    )
+                    ch = dc_replace(ch, url=resolved_url)
+                except Exception as err:
+                    self._logger.debug("Stalker diagnose resolve failed: %s", err)
+                    resolve_error = str(err)
+        result = diagnose_channel(ch, timeout=timeout)
+        if resolve_error:
+            result["resolve_error"] = resolve_error
+        return result
+
+    def _explain_playback_failure(self, channel) -> None:
+        """Find out why a channel failed and show the provider's reason in the banner."""
+        probe_target = getattr(self, "_current_replay_channel", None) or channel
+        playlist_id = self._current_playlist_id
+
+        def show(result):
+            # Ignore a late answer once the user (or auto-next) moved on.
+            if result is None or self._current_playback_channel is not channel:
+                return
+            reason, account_level = explain_failure(result)
+            if not reason:
+                return
+            self._logger.info("Motivo da falha de %s: %s", channel.name, result.get("status"))
+            if hasattr(self, "_player_widget"):
+                self._player_widget.set_error_reason(reason, stop_auto_next=account_level)
+
+        self._run_background(
+            lambda: self._probe_channel(probe_target, playlist_id, timeout=8),
+            show,
+            on_error=lambda _message: None,
+            context_playlist_id=playlist_id,
+            use_semaphore=False,
+        )
+
     @Slot(object)
     def _diagnose_channel(self, channel):
         channel = self._hydrate_channel(channel)
         playlist_id = self._current_playlist_id
 
         def run():
-            ch = channel
-            if ch.source == "stalker" and playlist_id:
-                url_lower = (ch.url or "").lower()
-                if (
-                    not url_lower.startswith(("http://", "https://", "rtmp://", "rtsp://", "udp://", "rtp://"))
-                    or "localhost" in url_lower
-                    or "127.0.0.1" in url_lower
-                ):
-                    try:
-                        resolved_url = self._call_stalker(
-                            playlist_id,
-                            lambda parser: parser.resolve_live_link(ch.url or ch.tvg_id or str(getattr(ch, "id", "") or "")),
-                        )
-                        ch = dc_replace(ch, url=resolved_url)
-                    except Exception as err:
-                        self._logger.debug("Stalker diagnose resolve failed: %s", err)
-            return diagnose_channel(
-                ch,
+            return self._probe_channel(
+                channel,
+                playlist_id,
                 timeout=self._settings.get("network_timeout_seconds", 30),
             )
 
         def show(result):
+            reason, _account_level = explain_failure(result)
             QMessageBox.information(
                 self,
                 "Diagnóstico do canal",
@@ -506,7 +545,8 @@ class PlaybackMixin:
                 f"Servidor: {result['host'] or 'não disponível'}\n"
                 f"Estado: {result['status']}\n"
                 f"Latência: {result['latency_ms']} ms\n"
-                f"Conteúdo: {result['content_type'] or 'não indicado'}",
+                f"Conteúdo: {result['content_type'] or 'não indicado'}"
+                + (f"\n\nMotivo provável: {reason}" if reason else ""),
             )
 
         self._run_background(
@@ -710,6 +750,8 @@ class PlaybackMixin:
         )
         if hasattr(self, "_player_widget"):
             self._player_widget.show_error_banner(message, is_live=is_live)
+        if channel is not None:
+            self._explain_playback_failure(channel)
 
     @Slot()
     def _retry_current_channel(self):

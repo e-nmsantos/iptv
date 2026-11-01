@@ -438,6 +438,29 @@ class PlayerWidgetUiTests(unittest.TestCase):
         widget.clear_error_banner()
         self.assertTrue(widget._error_banner.isHidden())
         self.assertFalse(widget._error_countdown_timer.isActive())
+
+    def test_provider_reason_is_shown_and_account_refusal_stops_auto_next(self):
+        from src.ui.player_widget import PlayerWidget
+        player = MagicMock(spec=MediaPlayer)
+        player.get_volume.return_value = 80
+        widget = PlayerWidget(media_player=player)
+
+        widget.set_error_reason("ignorado sem faixa", stop_auto_next=True)
+        self.assertNotIn("ignorado", widget._error_banner_text.text())
+
+        widget.show_error_banner("Erro", is_live=True)
+        widget.set_error_reason("Canal indisponível (HTTP 503).")
+        self.assertIn("HTTP 503", widget._error_banner_text.text())
+        self.assertTrue(widget._error_countdown_timer.isActive())
+
+        widget.set_error_reason("Conta recusada (HTTP 401).", stop_auto_next=True)
+        self.assertFalse(widget._error_countdown_timer.isActive())
+        self.assertIn("HTTP 401", widget._error_banner_text.text())
+        self.assertNotIn("canal seguinte", widget._error_banner_text.text())
+
+        widget.show_error_banner("Ficheiro inválido", is_live=False)
+        self.assertIn("Ficheiro inválido", widget._error_banner_text.text())
+        self.assertNotIn("HTTP 401", widget._error_banner_text.text())
         widget.close()
 
     def test_channel_list_page_size_and_pagination(self):
