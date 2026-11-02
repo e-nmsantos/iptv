@@ -23,6 +23,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.9", "3.13"]
+        # Python 3.9 has no builds for Ubuntu 26.04 (ubuntu-latest since Oct 2026).
+        exclude:
+          - os: ubuntu-latest
+            python-version: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.9"
     defaults:
       run:
         working-directory: iptv_player
