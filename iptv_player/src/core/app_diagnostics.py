@@ -76,7 +76,7 @@ def build_diagnostics_report(
             f"libVLC: {vlc.libvlc_get_version().decode(errors='ignore')}"
         )
     except Exception:
-        pass
+        lines.append("libVLC: indisponível")
 
     lines.append("")
     lines.append("[Definições]")

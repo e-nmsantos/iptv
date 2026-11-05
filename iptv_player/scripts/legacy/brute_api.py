@@ -1,9 +1,10 @@
 """Brute-force test all possible Stalker API actions."""
-import requests
 import hashlib
-import time
 import json
-from diagnostic_config import PORTAL, MAC, MAC_CLEAN
+import time
+
+import requests
+from diagnostic_config import MAC, MAC_CLEAN, PORTAL
 
 session = requests.Session()
 session.headers.update({
@@ -77,7 +78,7 @@ for action in actions:
                 print(f"  List of {len(js)} items")
                 if js and isinstance(js[0], dict):
                     print(f"  First item: {json.dumps(js[0], indent=2)[:200]}")
-        except:
+        except (ValueError, AttributeError):
             print(f"  Raw: {text[:200]}")
     else:
         print(f"  {action}: {len(text)} bytes - empty")

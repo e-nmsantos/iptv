@@ -248,8 +248,8 @@ class MediaPlayer(QObject):
         if self._player:
             try:
                 self._player.video_set_deinterlace(mode if enabled else "")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Setting deinterlace failed: %s", e)
 
     def is_deinterlace_enabled(self) -> bool:
         return self._deinterlace
@@ -690,8 +690,8 @@ class MediaPlayer(QObject):
                     last_id = tracks[-1][0]
                     if last_id > 0:
                         self._player.video_set_spu(last_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Selecting subtitle track failed: %s", e)
         return added
 
     def set_subtitle_delay(self, delay_ms: int) -> bool:
@@ -714,8 +714,8 @@ class MediaPlayer(QObject):
                 vlc_delay = self._player.video_get_spu_delay()
                 if vlc_delay is not None and vlc_delay != 0:
                     return int(vlc_delay / 1000)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Reading subtitle delay failed: %s", e)
         return getattr(self, "_subtitle_delay_ms", 0)
 
     def set_night_mode(self, enabled: bool) -> None:
@@ -731,8 +731,8 @@ class MediaPlayer(QObject):
                     eq.set_amp_at_index(5, 5.0)
                     eq.set_amp_at_index(6, 4.0)
                 self._player.set_equalizer(eq)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Night mode equalizer failed: %s", e)
 
     def is_night_mode_enabled(self) -> bool:
         return getattr(self, "_night_mode_enabled", False)

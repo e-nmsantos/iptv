@@ -488,6 +488,18 @@ class SettingsDialog(QDialog):
         self._user_agent.setText(self._settings.get("user_agent", ""))
         network_layout.addRow("User-Agent:", self._user_agent)
 
+        self._allow_insecure_tls = QCheckBox(
+            "Aceitar certificados TLS inválidos (apenas se confiares no fornecedor)"
+        )
+        self._allow_insecure_tls.setChecked(
+            self._settings.get("allow_insecure_tls", False)
+        )
+        self._allow_insecure_tls.setToolTip(
+            "As verificações de estado enviam as credenciais para o servidor.\n"
+            "Ativa apenas para fornecedores com certificados autoassinados ou expirados."
+        )
+        network_layout.addRow(self._allow_insecure_tls)
+
         self._update_url = QLineEdit()
         self._update_url.setText(self._settings.get("update_manifest_url", ""))
         self._update_url.setPlaceholderText("https://exemplo.com/manifest.json")
@@ -580,6 +592,7 @@ class SettingsDialog(QDialog):
                 "max_connections": self._max_conn.value(),
                 "network_timeout_seconds": self._timeout.value(),
                 "user_agent": self._user_agent.text(),
+                "allow_insecure_tls": self._allow_insecure_tls.isChecked(),
                 "epg_auto_update": self._auto_epg.isChecked(),
                 "epg_update_interval_hours": self._epg_interval.value(),
                 "recording_folder": self._recording_folder.text(),

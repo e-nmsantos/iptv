@@ -1,9 +1,11 @@
 """Analyze portal web interface like Stalker Portal Player would."""
-import requests
 import hashlib
-import time
 import json
-from diagnostic_config import PORTAL, MAC, MAC_CLEAN
+import time
+
+import requests
+from diagnostic_config import MAC, MAC_CLEAN, PORTAL
+
 
 def check_web_paths():
     """Check web interface paths with Android User-Agent."""

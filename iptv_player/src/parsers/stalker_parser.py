@@ -29,6 +29,11 @@ from ..core.playlist import Playlist
 
 logger = logging.getLogger(__name__)
 
+# Plausible epoch range for EPG timestamps (1990-01-01 .. 2100-01-01). Values
+# outside it are compact YYYYMMDDHHMMSS strings, not Unix times.
+EPG_EPOCH_MIN = 631_152_000
+EPG_EPOCH_MAX = 4_102_444_800
+
 
 class StalkerParser:
     """
@@ -1033,7 +1038,11 @@ class StalkerParser:
             timestamp = float(value)
             if timestamp > 10_000_000_000:
                 timestamp /= 1000
-            return datetime.fromtimestamp(timestamp, timezone.utc).astimezone()
+            # Compact timestamps (YYYYMMDDHHMMSS) also parse as floats; only
+            # treat plausible epoch values as timestamps so they fall through
+            # to the "%Y%m%d%H%M%S" branch below instead of 2611-02-06.
+            if EPG_EPOCH_MIN <= timestamp <= EPG_EPOCH_MAX:
+                return datetime.fromtimestamp(timestamp, timezone.utc).astimezone()
         except (TypeError, ValueError, OSError):
             pass
 

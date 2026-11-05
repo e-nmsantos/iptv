@@ -1,9 +1,11 @@
 """Test all possible Stalker channel endpoints."""
-import requests
 import hashlib
-import time
 import json
-from diagnostic_config import PORTAL, MAC
+import time
+
+import requests
+from diagnostic_config import MAC, PORTAL
+
 
 def try_all():
     session = requests.Session()

@@ -1,7 +1,9 @@
 """Deep analysis of Stalker portal HTML."""
-import requests
 import re
-from diagnostic_config import PORTAL, MAC
+
+import requests
+from diagnostic_config import PORTAL
+
 
 def analyze():
     session = requests.Session()
@@ -17,13 +19,13 @@ def analyze():
     
     # Look for all URLs, links, API endpoints
     urls = re.findall(r'(?:src|href|action)=["\']([^"\']+)["\']', html, re.IGNORECASE)
-    print(f"\nURLs found in page:")
+    print("\nURLs found in page:")
     for url in set(urls):
         print(f"  {url}")
     
     # Look for JavaScript variables/objects
     vars_found = re.findall(r'var\s+(\w+)\s*[=:]', html)
-    print(f"\nJS variables:")
+    print("\nJS variables:")
     for v in sorted(set(vars_found)):
         print(f"  {v}")
     
@@ -35,12 +37,12 @@ def analyze():
     
     # Look for server paths/endpoints
     paths = re.findall(r'["\']([a-zA-Z0-9_/.-]+\.php[^"\']*)["\']', html)
-    print(f"\nPHP endpoints:")
+    print("\nPHP endpoints:")
     for p in sorted(set(paths)):
         print(f"  {p}")
     
     # Check if there's a login mechanism
-    print(f"\nSearching for login/forms...")
+    print("\nSearching for login/forms...")
     if "login" in html.lower():
         login_idx = html.lower().index("login")
         print(f"  'login' found at {login_idx}")

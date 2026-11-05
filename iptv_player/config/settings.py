@@ -26,6 +26,7 @@ class Settings:
         "buffer_size_ms": 5000,
         "network_timeout_seconds": 30,
         "max_connections": 5,
+        "allow_insecure_tls": False,
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "window_geometry": None,
         "window_state": None,

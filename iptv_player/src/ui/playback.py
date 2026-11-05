@@ -202,8 +202,8 @@ class PlaybackMixin:
                         parsed_srv = urlparse(pl["server_url"])
                         if parsed_srv.port and ":80/" in play_url:
                             play_url = play_url.replace(":80/", f":{parsed_srv.port}/", 1)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._logger.debug("Xtream port normalization skipped: %s", e)
 
             self._media_player.play(
                 play_url,

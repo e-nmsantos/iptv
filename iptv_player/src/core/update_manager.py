@@ -1,6 +1,9 @@
 """Small, backend-agnostic release manifest and integrity verifier."""
 
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
@@ -10,8 +13,11 @@ from urllib.parse import urlparse
 
 import requests
 
+from config import RELEASE_PUBLIC_KEY
+
 MAX_MANIFEST_BYTES = 256 * 1024
 VERSION_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+SIGNATURE_FIELD = "signature"
 
 
 @dataclass(frozen=True)
@@ -42,9 +48,42 @@ def is_newer_version(candidate: str, current: str) -> bool:
     return version_tuple(candidate) > version_tuple(current)
 
 
-def parse_manifest(data: dict) -> ReleaseInfo:
+def canonical_payload(data: dict) -> bytes:
+    """Bytes covered by the manifest signature (everything but the signature)."""
+    payload = {key: value for key, value in data.items() if key != SIGNATURE_FIELD}
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def verify_manifest_signature(
+    data: dict, signature_b64: str, public_key_b64: str
+) -> bool:
+    """Verify an Ed25519 signature over the canonical manifest payload."""
+    if not signature_b64 or not public_key_b64:
+        return False
+    try:
+        from Crypto.Signature import eddsa
+
+        key = eddsa.import_public_key(base64.b64decode(public_key_b64, validate=True))
+        verifier = eddsa.new(key, "rfc8032")
+        verifier.verify(
+            canonical_payload(data),
+            base64.b64decode(signature_b64, validate=True),
+        )
+        return True
+    except (ValueError, TypeError, binascii.Error):
+        return False
+
+
+def parse_manifest(data: dict, public_key: Optional[str] = None) -> ReleaseInfo:
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise ValueError("Manifesto de atualização incompatível.")
+    expected_key = RELEASE_PUBLIC_KEY if public_key is None else public_key
+    if expected_key:
+        signature = str(data.get(SIGNATURE_FIELD, "") or "")
+        if not verify_manifest_signature(data, signature, expected_key):
+            raise ValueError("Assinatura do manifesto de atualização inválida.")
     version = str(data.get("version", ""))
     version_tuple(version)
     raw_artifacts = data.get("artifacts")
@@ -108,7 +147,7 @@ def verify_artifact(path: Path, artifact: ReleaseArtifact) -> bool:
     with path.open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest().lower() == artifact.sha256
+    return hmac.compare_digest(digest.hexdigest().lower(), artifact.sha256)
 
 
 MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024  # 1 GiB sanity cap

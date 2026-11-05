@@ -1,9 +1,10 @@
 """Test Stalker with browser-like navigation flow."""
-import requests
 import hashlib
-import time
 import json
-from diagnostic_config import PORTAL, MAC, MAC_CLEAN
+import time
+
+import requests
+from diagnostic_config import MAC, MAC_CLEAN, PORTAL
 
 session = requests.Session()
 

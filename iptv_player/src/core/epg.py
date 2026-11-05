@@ -1,10 +1,11 @@
 """EPG (Electronic Program Guide) data models."""
 
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
 from typing import Optional
+
+from defusedxml import ElementTree as ET
 
 
 @dataclass

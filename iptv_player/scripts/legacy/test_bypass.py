@@ -1,6 +1,7 @@
 """Test bypassing Cloudflare on get.php."""
 import requests
-from diagnostic_config import PORTAL, MAC, MAC_CLEAN
+from diagnostic_config import MAC, MAC_CLEAN, PORTAL
+
 
 def test_with_headers():
     """Test with full browser headers."""
@@ -35,7 +36,7 @@ def test_with_headers():
         else:
             print(f"Content: {r.text[:300]}")
     else:
-        print(f"Not 200 - CF protected or error")
+        print("Not 200 - CF protected or error")
 
 
 def test_with_get_params():

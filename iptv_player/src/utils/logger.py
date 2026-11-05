@@ -43,63 +43,79 @@ class _SensitiveDataFilter(logging.Filter):
         return True
 
 
+_CONFIGURED_ATTR = "_iptv_player_configured"
+
+# Third-party libraries that would otherwise flood the DEBUG file handler.
+_NOISY_LOGGERS = (
+    "urllib3",
+    "requests",
+    "charset_normalizer",
+    "pychromecast",
+    "zeroconf",
+    "asyncio",
+)
+
+
 def setup_logger(name: str = "iptv_player") -> logging.Logger:
     """
-    Set up and configure the application logger.
-    
-    Creates both console and file handlers with appropriate formatting.
-    Log files are stored in the app config directory.
-    
+    Set up and configure application-wide logging.
+
+    Handlers live on the root logger so that every module logger
+    (``logging.getLogger(__name__)``) writes to the same console and file
+    output with the credential-redaction filter applied. Configuration runs
+    only once per process.
+
     Args:
         name: Logger name
-        
+
     Returns:
         Configured logger instance
     """
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
 
-    # Avoid duplicate handlers
-    if logger.handlers:
-        return logger
-
-    # Formatter
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    # Console handler (INFO and above)
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    console_handler.addFilter(_SensitiveDataFilter())
-    logger.addHandler(console_handler)
-
-    # File handler (DEBUG and above)
-    try:
-        log_file = log_file_path()
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-
-        file_handler = RotatingFileHandler(
-            str(log_file),
-            maxBytes=5 * 1024 * 1024,  # 5MB
-            backupCount=3,
-            encoding="utf-8",
+    root = logging.getLogger()
+    if not getattr(root, _CONFIGURED_ATTR, False):
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(_SensitiveDataFilter())
-        logger.addHandler(file_handler)
-    except Exception as e:
-        logger.warning(f"Could not create file handler: {e}")
+
+        # Console handler (INFO and above)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        console_handler.addFilter(_SensitiveDataFilter())
+        root.addHandler(console_handler)
+
+        # File handler (DEBUG and above)
+        try:
+            log_file = log_file_path()
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+
+            file_handler = RotatingFileHandler(
+                str(log_file),
+                maxBytes=5 * 1024 * 1024,  # 5MB
+                backupCount=3,
+                encoding="utf-8",
+            )
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            file_handler.addFilter(_SensitiveDataFilter())
+            root.addHandler(file_handler)
+        except Exception as e:
+            root.warning("Could not create file handler: %s", e)
+
+        root.setLevel(logging.DEBUG)
+        for noisy in _NOISY_LOGGERS:
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+        setattr(root, _CONFIGURED_ATTR, True)
 
     return logger
 
 
 def get_logger(name: str = "iptv_player") -> logging.Logger:
     """Get an existing logger or create a new one."""
-    logger = logging.getLogger(name)
-    if not logger.handlers:
+    if not getattr(logging.getLogger(), _CONFIGURED_ATTR, False):
         return setup_logger(name)
-    return logger
+    return logging.getLogger(name)

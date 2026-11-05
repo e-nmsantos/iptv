@@ -592,10 +592,18 @@ class CatalogMixin:
         dialog = ParentalPinDialog(self, title=f"PIN para desbloquear '{group}'")
         if dialog.exec() != ParentalPinDialog.DialogCode.Accepted:
             return
-        from ..core.parental import verify_pin
+        from ..core.parental import hash_pin, needs_rehash, verify_pin
 
         if verify_pin(dialog.pin, pin_salt, pin_hash):
             self._pin_attempts.reset()
+            if needs_rehash(pin_hash):
+                # Silently upgrade hashes created with the old cost factor.
+                try:
+                    self._settings.set_many(
+                        {"parental_pin_hash": hash_pin(dialog.pin, pin_salt)}
+                    )
+                except (OSError, ValueError) as exc:
+                    self._logger.warning(f"Failed to upgrade parental PIN hash: {exc}")
             widget.unlock_group_session(group)
         else:
             self._pin_attempts.register_failure()

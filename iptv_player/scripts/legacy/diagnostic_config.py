@@ -7,7 +7,6 @@ real third-party service.
 
 import os
 
-
 PORTAL = os.environ.get("IPTV_TEST_PORTAL", "http://127.0.0.1:9").rstrip("/")
 MAC = os.environ.get("IPTV_TEST_MAC", "00:00:00:00:00:00")
 MAC_CLEAN = MAC.lower().replace(":", "")

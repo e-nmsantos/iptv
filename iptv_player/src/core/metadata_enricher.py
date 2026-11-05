@@ -89,16 +89,16 @@ class MetadataEnricher:
             try:
                 with open(self._cache_file, encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Ignoring unreadable metadata cache: %s", e)
         return {}
 
     def _save_cache(self):
         try:
             with open(self._cache_file, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not save metadata cache: %s", e)
 
     @staticmethod
     def extract_title_and_year(raw_title: str) -> tuple[str, Optional[int]]:

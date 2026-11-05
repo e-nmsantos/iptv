@@ -1,9 +1,10 @@
 """Test ext_module.php with various auth approaches."""
-import requests
 import hashlib
-import time
 import json
-from diagnostic_config import PORTAL, MAC, MAC_CLEAN
+import time
+
+import requests
+from diagnostic_config import MAC_CLEAN, PORTAL
 
 s = requests.Session()
 s.headers.update({

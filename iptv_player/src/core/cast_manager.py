@@ -3,15 +3,16 @@
 import http.server
 import logging
 import re
+import secrets
 import socket
 import socketserver
 import threading
 import time
 import urllib.request
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
 
+from defusedxml import ElementTree as ET
 from PySide6.QtCore import QObject, Signal
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,13 @@ class _ProxyRequestHandler(http.server.BaseHTTPRequestHandler):
     def _dispatch(self, head_only: bool = False):
         server: _CastStreamProxyServer = self.server
 
+        # Reject anything that does not carry this proxy's capability token so
+        # the stream is not exposed to other devices on the LAN.
+        token = getattr(server.proxy_instance, "_token", "")
+        if not token or not self.path.startswith(f"/{token}/"):
+            self.send_error(404, "Not found")
+            return
+
         # 1. Live HLS manifest
         if "/hls/live.m3u8" in self.path:
             self.send_response(200)
@@ -87,7 +95,7 @@ class _ProxyRequestHandler(http.server.BaseHTTPRequestHandler):
             ]
             for s in seqs:
                 manifest_lines.append("#EXTINF:3.0,")
-                manifest_lines.append(f"http://{host_header}/hls/chunk_{s}.ts")
+                manifest_lines.append(f"http://{host_header}/{server.proxy_instance._token}/hls/chunk_{s}.ts")
 
             body = "\n".join(manifest_lines) + "\n"
             try:
@@ -195,8 +203,8 @@ class _ProxyRequestHandler(http.server.BaseHTTPRequestHandler):
             try:
                 if not self.wfile.closed:
                     self.send_error(502, f"Stream proxy error: {e}")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to report proxy error to client: %s", exc)
 
 
 class _CastStreamProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -224,6 +232,10 @@ class CastStreamProxy:
         self._hls_thread: Optional[threading.Thread] = None
         self._port: int = 0
         self._local_ip: str = get_local_ip()
+        # Capability token: the proxy serves the user's stream unauthenticated,
+        # so every URL carries a per-process secret. Without it any device on
+        # the LAN that scans the port could watch the stream.
+        self._token: str = secrets.token_urlsafe(16)
 
     def start(self) -> int:
         if self._server is not None:
@@ -264,7 +276,7 @@ class CastStreamProxy:
         # For live MPEG-TS streams, Chromecast requires HLS container
         if is_ts_stream and is_live:
             self._start_hls_streamer(url, headers or {})
-            return f"http://{self._local_ip}:{self._port}/hls/live.m3u8"
+            return f"http://{self._local_ip}:{self._port}/{self._token}/hls/live.m3u8"
 
         if ".m3u8" in lower:
             ext = "m3u8"
@@ -275,7 +287,7 @@ class CastStreamProxy:
         else:
             ext = "ts"
 
-        return f"http://{self._local_ip}:{self._port}/stream.{ext}"
+        return f"http://{self._local_ip}:{self._port}/{self._token}/stream.{ext}"
 
     def _start_hls_streamer(self, target_url: str, headers: dict):
         """Buffer and segment upstream TS packets into live HLS slices in memory."""
@@ -715,8 +727,8 @@ class CastManager(QObject):
         if self._dedicated_player:
             try:
                 self._dedicated_player.stop()
-            except Exception:
-                pass
+            except Exception as ex:
+                logger.debug("Stopping dedicated cast player failed: %s", ex)
             self._dedicated_player = None
 
         if dev:

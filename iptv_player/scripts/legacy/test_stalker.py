@@ -1,9 +1,11 @@
 """Test script for Stalker Portal debugging."""
-import requests
 import hashlib
-import time
 import json
-from diagnostic_config import PORTAL, MAC
+import time
+
+import requests
+from diagnostic_config import MAC, PORTAL
+
 
 def test_endpoints():
     """Test various Stalker endpoints and approaches."""

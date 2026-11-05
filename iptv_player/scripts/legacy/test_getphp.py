@@ -1,6 +1,7 @@
 """Try various approaches to access get.php."""
 import requests
-from diagnostic_config import PORTAL, MAC_CLEAN
+from diagnostic_config import MAC_CLEAN, PORTAL
+
 
 def try_approach(description, method, url, data=None, headers=None):
     """Try accessing get.php with different approaches."""

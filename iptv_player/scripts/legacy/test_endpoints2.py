@@ -1,6 +1,6 @@
 """Investigate found endpoints."""
 import requests
-from diagnostic_config import PORTAL, MAC, MAC_CLEAN
+from diagnostic_config import MAC, MAC_CLEAN, PORTAL
 
 s = requests.Session()
 s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})

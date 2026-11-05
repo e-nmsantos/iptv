@@ -1,10 +1,11 @@
 """Test both portals side by side."""
-import requests
 import hashlib
-import time
 import json
 import os
-from diagnostic_config import PORTAL, MAC
+import time
+
+import requests
+from diagnostic_config import MAC, PORTAL
 
 portals = [
     (PORTAL, MAC),
@@ -44,7 +45,7 @@ for portal_url, mac in portals:
     if r.text:
         print(f"  Response: {r.text[:200]}")
     else:
-        print(f"  -> EMPTY")
+        print("  -> EMPTY")
 
     # get.php M3U
     r = s.get(
@@ -54,6 +55,6 @@ for portal_url, mac in portals:
     is_m3u = "#EXTM3U" in r.text
     print(f"  get.php M3U: [{r.status_code}] {len(r.text)} bytes")
     if is_m3u:
-        print(f"  *** M3U FOUND via get.php! ***")
+        print("  *** M3U FOUND via get.php! ***")
         print(f"  First 300 chars: {r.text[:300]}")
     print()

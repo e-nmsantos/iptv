@@ -3,7 +3,6 @@ import gzip
 import io
 import logging
 import re
-import ssl
 import urllib.parse
 import xmlrpc.client
 from pathlib import Path
@@ -74,8 +73,8 @@ class SubtitlesFinder:
         self._vlsub_token: Optional[str] = None
 
     def _get_vlsub_proxy(self):
-        ctx = ssl._create_unverified_context()
-        return xmlrpc.client.ServerProxy(VLSub_XMLRPC_URL, context=ctx)
+        # Certificate verification stays on: the endpoint is public.
+        return xmlrpc.client.ServerProxy(VLSub_XMLRPC_URL)
 
     def _get_vlsub_token(self) -> Optional[str]:
         if self._vlsub_token:
@@ -433,10 +432,16 @@ class SubtitlesFinder:
             return None
 
     def save_subtitle_file(self, content_text: str, filename: str) -> Path:
-        """Save subtitle content as UTF-8 encoded .srt in cache directory."""
-        if not filename.endswith(".srt"):
-            filename += ".srt"
-        target_path = self.cache_dir / filename
+        """Save subtitle content as UTF-8 ``.srt`` in the cache directory.
+
+        The name is reduced to a safe stem: providers control release names, so
+        a separator or ``..`` must never let the file escape the cache folder.
+        """
+        stem = Path(filename).name
+        if stem.lower().endswith(".srt"):
+            stem = stem[:-4]
+        safe_stem = re.sub(r"[\W_]+", "_", stem).strip("_") or "subtitles"
+        target_path = self.cache_dir / f"{safe_stem}.srt"
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(content_text)
         return target_path

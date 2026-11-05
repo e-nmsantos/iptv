@@ -17,11 +17,27 @@ from PySide6.QtCore import QObject, Signal
 
 logger = logging.getLogger(__name__)
 
-# SSL context that allows self-signed/expired provider certificates common in IPTV
-try:
-    UNVERIFIED_SSL = ssl._create_unverified_context()
-except Exception:
-    UNVERIFIED_SSL = None
+
+def _is_certificate_error(error: BaseException) -> bool:
+    """True when the failure is a TLS certificate problem, not a network error."""
+    reason = getattr(error, "reason", error)
+    return isinstance(reason, ssl.SSLError)
+
+
+_CERTIFICATE_HELP = (
+    "Certificado TLS inválido. Se confias neste fornecedor, ativa "
+    "«Permitir certificados não verificados» em Definições → Rede."
+)
+
+
+def _configured_insecure_tls() -> bool:
+    """Read the user's TLS preference without letting a config error break checks."""
+    try:
+        from config.settings import Settings
+
+        return bool(Settings().get("allow_insecure_tls", False))
+    except Exception:
+        return False
 
 
 @dataclass
@@ -44,13 +60,23 @@ class PlaylistHealthChecker(QObject):
     _instance: Optional["PlaylistHealthChecker"] = None
 
     @classmethod
-    def get_instance(cls) -> "PlaylistHealthChecker":
+    def get_instance(cls, insecure_tls: Optional[bool] = None) -> "PlaylistHealthChecker":
         if cls._instance is None:
-            cls._instance = PlaylistHealthChecker()
+            if insecure_tls is None:
+                insecure_tls = _configured_insecure_tls()
+            cls._instance = PlaylistHealthChecker(insecure_tls=insecure_tls)
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, insecure_tls: bool = False):
         super().__init__()
+        # Certificate verification is on by default: these probes carry the
+        # user's credentials in the URL/headers. Self-signed provider
+        # certificates stay supported as an explicit opt-in setting.
+        self._ssl_context = (
+            ssl._create_unverified_context()
+            if insecure_tls
+            else ssl.create_default_context()
+        )
         self._cache: dict[int, HealthStatus] = {}
         self._checking: set = set()
         self._lock = threading.Lock()
@@ -153,7 +179,7 @@ class PlaylistHealthChecker(QObject):
                 headers={"User-Agent": "IPTVSmartersPlayer/1.0.0 (Linux; Android 11)"},
             )
             try:
-                with urllib.request.urlopen(req, timeout=4.0, context=UNVERIFIED_SSL) as resp:
+                with urllib.request.urlopen(req, timeout=4.0, context=self._ssl_context) as resp:
                     latency = int((time.time() - t0) * 1000)
                     raw_data = resp.read()
                     data = json.loads(raw_data.decode("utf-8", errors="ignore"))
@@ -205,6 +231,13 @@ class PlaylistHealthChecker(QObject):
                     checked_at=checked_time,
                 )
             except Exception as e:
+                if _is_certificate_error(e):
+                    return HealthStatus(
+                        playlist_id=pl_id,
+                        status="offline",
+                        message=_CERTIFICATE_HELP,
+                        checked_at=checked_time,
+                    )
                 return HealthStatus(
                     playlist_id=pl_id,
                     status="offline",
@@ -255,7 +288,7 @@ class PlaylistHealthChecker(QObject):
                 },
             )
             try:
-                with urllib.request.urlopen(req, timeout=4.0, context=UNVERIFIED_SSL) as resp:
+                with urllib.request.urlopen(req, timeout=4.0, context=self._ssl_context) as resp:
                     latency = int((time.time() - t0) * 1000)
                     raw_data = resp.read()
                     text = raw_data.decode("utf-8", errors="ignore")
@@ -275,6 +308,13 @@ class PlaylistHealthChecker(QObject):
                     checked_at=checked_time,
                 )
             except Exception as e:
+                if _is_certificate_error(e):
+                    return HealthStatus(
+                        playlist_id=pl_id,
+                        status="offline",
+                        message=_CERTIFICATE_HELP,
+                        checked_at=checked_time,
+                    )
                 return HealthStatus(
                     playlist_id=pl_id,
                     status="offline",
@@ -296,7 +336,7 @@ class PlaylistHealthChecker(QObject):
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=4.0, context=UNVERIFIED_SSL) as resp:
+            with urllib.request.urlopen(req, timeout=4.0, context=self._ssl_context) as resp:
                 latency = int((time.time() - t0) * 1000)
                 if resp.status in (200, 206, 302):
                     return HealthStatus(
@@ -314,6 +354,13 @@ class PlaylistHealthChecker(QObject):
                     checked_at=checked_time,
                 )
         except Exception as e:
+            if _is_certificate_error(e):
+                return HealthStatus(
+                    playlist_id=pl_id,
+                    status="offline",
+                    message=_CERTIFICATE_HELP,
+                    checked_at=checked_time,
+                )
             return HealthStatus(
                 playlist_id=pl_id,
                 status="offline",

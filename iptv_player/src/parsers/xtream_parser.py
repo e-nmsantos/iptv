@@ -26,6 +26,11 @@ from ..core.playlist import Playlist
 
 logger = logging.getLogger(__name__)
 
+# Plausible epoch range for EPG timestamps (1990-01-01 .. 2100-01-01). Values
+# outside it are compact YYYYMMDDHHMMSS strings, not Unix times.
+EPG_EPOCH_MIN = 631_152_000
+EPG_EPOCH_MAX = 4_102_444_800
+
 
 class XtreamParser:
     """
@@ -403,12 +408,17 @@ class XtreamParser:
                 value = float(timestamp)
                 if value > 10_000_000_000:
                     value /= 1000
-                return datetime.fromtimestamp(value, timezone.utc).astimezone()
+                # Compact timestamps (YYYYMMDDHHMMSS) also parse as floats; only
+                # convert plausible epochs so they reach the text branches below.
+                if EPG_EPOCH_MIN <= value <= EPG_EPOCH_MAX:
+                    return datetime.fromtimestamp(value, timezone.utc).astimezone()
             except (TypeError, ValueError, OSError):
                 pass
 
-        if text:
-            value = str(text).strip()
+        for candidate in (timestamp, text):
+            if not candidate:
+                continue
+            value = str(candidate).strip()
             try:
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
                 return parsed if parsed.tzinfo else parsed.astimezone()

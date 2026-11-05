@@ -1,6 +1,7 @@
 """Find alternative API endpoints on the portal."""
 import requests
-from diagnostic_config import PORTAL, MAC, MAC_CLEAN
+from diagnostic_config import PORTAL
+
 
 def check_paths():
     s = requests.Session()
@@ -33,7 +34,7 @@ def check_paths():
                 print(f"[{r.status_code}] {path}: {len(r.text)} bytes")
                 if r.status_code == 200 and len(r.text) < 500:
                     print(f"  Content: {r.text[:200]}")
-        except Exception as e:
+        except Exception:
             pass
 
     print("\nDone scanning paths.")
