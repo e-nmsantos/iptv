@@ -6,6 +6,7 @@ import java.io.Closeable
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -91,6 +92,12 @@ class PairingServer(
                         }
                     } catch (_: SocketTimeoutException) {
                         // Wake periodically to enforce expiry.
+                    } catch (_: SocketException) {
+                        // close() (user cancelled, PIN limit) unblocks accept() this way. Any
+                        // other socket failure also ends the session: an exception escaping this
+                        // thread would kill the whole app on Android.
+                        if (!closed.get()) onExpired()
+                        break
                     }
                 }
                 if (!closed.get() && !consumed.get() && now() >= expiresAt) onExpired()
@@ -137,9 +144,16 @@ class PairingServer(
         onPayloadReceived: (PairingPayload) -> Unit,
     ) {
         val json = "application/json; charset=utf-8"
+        // Checked per request, not only in the accept loop: parallel connections accepted
+        // before the loop notices the limit must not get extra guesses, even with the right PIN.
+        if (failedPins.get() >= MAX_PIN_ATTEMPTS) {
+            return respond(output, 403, """{"error":"Demasiadas tentativas"}""", json)
+        }
         if (request.path != syncPath) {
-            failedPins.incrementAndGet()
-            return respond(output, 403, """{"error":"PIN incorreto"}""", json)
+            val failures = failedPins.incrementAndGet()
+            respond(output, 403, """{"error":"PIN incorreto"}""", json)
+            if (failures >= MAX_PIN_ATTEMPTS) close()
+            return
         }
         when (request.method) {
             "GET" -> respond(output, 200, exportData.ifBlank { """{"schema_version":1,"favorites":[],"progress":{}}""" }, json)

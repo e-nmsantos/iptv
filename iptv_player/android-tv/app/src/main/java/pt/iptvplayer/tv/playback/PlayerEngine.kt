@@ -17,6 +17,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
+import pt.iptvplayer.tv.data.APP_USER_AGENT
 import pt.iptvplayer.tv.data.DecoderPreference
 import pt.iptvplayer.tv.data.PlayerSettings
 import pt.iptvplayer.tv.data.TimeshiftBuffer
@@ -146,7 +147,7 @@ fun buildPlayerSession(
         .setConnectTimeoutMs(15_000)
         .setReadTimeoutMs(60_000)
         .setTransferListener(bandwidthMeter)
-        .setUserAgent(channel.userAgent.ifBlank { "IPTVPlayerTV/0.9" })
+        .setUserAgent(channel.userAgent.ifBlank { APP_USER_AGENT })
         .setDefaultRequestProperties(
             mapOf("Connection" to "keep-alive", "Accept-Encoding" to "identity") + channel.requestHeaders,
         )

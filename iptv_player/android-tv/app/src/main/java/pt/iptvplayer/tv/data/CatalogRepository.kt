@@ -163,7 +163,7 @@ class CatalogRepository(
                 conn.connectTimeout = 15_000
                 conn.readTimeout = 30_000
                 conn.instanceFollowRedirects = false
-                conn.setRequestProperty("User-Agent", "IPTVPlayerTV/0.9")
+                conn.setRequestProperty("User-Agent", APP_USER_AGENT)
                 conn.setRequestProperty("Accept-Encoding", "gzip")
                 conn.connect()
 

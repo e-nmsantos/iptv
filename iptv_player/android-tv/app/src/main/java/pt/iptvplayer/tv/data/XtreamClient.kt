@@ -11,7 +11,7 @@ import pt.iptvplayer.tv.model.StreamType
 
 class XtreamClient(private val config: SourceConfig) {
     private val baseUrl = normalizeBaseUrl(config.serverUrl)
-    private val http = JsonHttpClient("IPTVPlayerTV/0.9")
+    private val http = JsonHttpClient(APP_USER_AGENT)
     private var streamBaseUrl = baseUrl
 
     fun loadCatalog(): Playlist {

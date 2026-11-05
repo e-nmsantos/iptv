@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,8 +16,8 @@ android {
         applicationId = "pt.iptvplayer.tv"
         minSdk = 23
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.14.0-beta01"
+        versionCode = 20
+        versionName = "0.14.0-beta02"
 
         // Optional TMDB metadata lookup. Supplied through -PTMDB_API_KEY=... or
         // gradle.properties so no API key is committed to the repository.
@@ -52,11 +54,35 @@ android {
         getByName("androidTest").assets.srcDir("$projectDir/schemas")
     }
 
+    // The release key lives in keystore/ + keystore.properties (both git-ignored, back them up).
+    // It must stay the same forever: Android refuses to install an update signed with another
+    // key, and uninstalling wipes playlists, favourites and resume points. ~/.android's debug
+    // key is not safe for this — Android Studio regenerates it and it differs on every PC.
+    val releaseKeyProps = rootProject.file("keystore.properties").takeIf { it.isFile }?.let { file ->
+        Properties().apply { file.inputStream().use { load(it) } }
+    }
+    signingConfigs {
+        if (releaseKeyProps != null) {
+            create("release") {
+                storeFile = rootProject.file(releaseKeyProps.getProperty("storeFile"))
+                storePassword = releaseKeyProps.getProperty("storePassword")
+                keyAlias = releaseKeyProps.getProperty("keyAlias")
+                keyPassword = releaseKeyProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // Personal sideload build: signed with the local debug key so it installs over
-            // the existing debug APK without wiping playlists, favourites or resume points.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeyProps != null) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "keystore.properties em falta: a release fica assinada com a chave de debug " +
+                        "deste PC e pode não instalar por cima da versão que está na TV.",
+                )
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

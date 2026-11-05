@@ -30,7 +30,7 @@ internal class EpgClient {
             connection.connectTimeout = 15_000
             connection.readTimeout = 35_000
             connection.instanceFollowRedirects = true
-            connection.setRequestProperty("User-Agent", "IPTVPlayerTV/0.9")
+            connection.setRequestProperty("User-Agent", APP_USER_AGENT)
             connection.setRequestProperty("Accept-Encoding", "gzip")
             connection.connect()
             require(connection.responseCode in 200..299) { "O servidor EPG respondeu com HTTP ${connection.responseCode}." }

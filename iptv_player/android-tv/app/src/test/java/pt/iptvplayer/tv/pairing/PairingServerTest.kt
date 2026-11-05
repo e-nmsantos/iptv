@@ -214,4 +214,44 @@ class PairingServerTest {
             server.close()
         }
     }
+
+    @Test
+    fun `correct pin is refused right after the fifth wrong one`() {
+        val received = mutableListOf<PairingPayload>()
+        val server = PairingServer(InetAddress.getLoopbackAddress())
+        try {
+            val session = server.start(onPayloadReceived = { received += it })
+            val wrong = if (session.pin == "111111") "222222" else "111111"
+            repeat(5) {
+                val get = URL("http://127.0.0.1:${session.port}/sync/$wrong").openConnection() as HttpURLConnection
+                assertEquals(403, get.responseCode)
+            }
+            // No pause: the limit must hold even before the accept loop notices it.
+            val code = runCatching {
+                (URL("http://127.0.0.1:${session.port}/sync/${session.pin}").openConnection() as HttpURLConnection)
+                    .apply { connectTimeout = 1_000; readTimeout = 1_000 }.responseCode
+            }.getOrNull()
+            assertTrue("correct pin must not be accepted, got $code", code == null || code == 403)
+            assertTrue(received.isEmpty())
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun `closing an active session does not throw on the acceptor thread`() {
+        val uncaught = mutableListOf<Throwable>()
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, error -> synchronized(uncaught) { uncaught += error } }
+        try {
+            val server = PairingServer(InetAddress.getLoopbackAddress())
+            server.start(onPayloadReceived = {})
+            Thread.sleep(200) // let the acceptor block inside accept()
+            server.close()
+            Thread.sleep(1_500)
+            synchronized(uncaught) { assertTrue("uncaught: $uncaught", uncaught.isEmpty()) }
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+    }
 }

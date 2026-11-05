@@ -3,6 +3,18 @@
 Histórico de mudanças relevantes da aplicação Android TV. O `README.md`
 descreve apenas o estado atual.
 
+## 0.14.0-beta02
+
+- Corrigido um possível fecho da aplicação ao cancelar ou fechar o ecrã de
+  emparelhamento.
+- PIN do emparelhamento: depois de 5 tentativas erradas, nem o PIN certo é
+  aceite e a sessão fecha logo (antes, pedidos em paralelo podiam ganhar
+  tentativas extra).
+- O User-Agent enviado aos servidores passa a indicar a versão real da app
+  (antes dizia sempre 0.9).
+- A release é assinada com uma chave própria (`keystore/`, fora do git), igual
+  à da versão instalada, para as atualizações instalarem sempre por cima.
+
 ## 0.14.0-beta01
 
 - Descodificadores FFmpeg incluídos (AC-3, E-AC-3, DTS, TrueHD, MP2…): acaba o
