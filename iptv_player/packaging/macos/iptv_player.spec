@@ -22,7 +22,6 @@ a = Analysis(
 
         # HTTP / network
         "requests",
-        "aiohttp",
 
         # Cryptography (Stalker Portal)
         "Crypto",
@@ -49,16 +48,6 @@ a = Analysis(
         "PySide6.QtWidgets",
         "PySide6.QtCore",
         "PySide6.QtGui",
-
-        # XML / EPG parsing
-        "lxml",
-        "m3u8",
-
-        # Async I/O
-        "aiofiles",
-
-        # Validation
-        "validators",
 
         # All project modules (safety net for PyInstaller tree traversal)
         "config",

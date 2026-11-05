@@ -178,8 +178,8 @@ iptv_player/
 
 - **PySide6** — Interface gráfica Qt6
 - **python-vlc** — Reprodução de streams
-- **requests / aiohttp** — Clientes HTTP
-- **lxml** — Parsing XML (EPG XMLTV)
+- **requests** — Cliente HTTP (M3U, EPG, atualizações)
+- **xml.etree** — Parsing XML (EPG XMLTV)
 - **SQLite** — Base de dados local
 
 ## 📝 Notas

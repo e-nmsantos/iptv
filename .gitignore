@@ -13,3 +13,4 @@ iptv_player/release/
 iptv_player/packaging/macos/iconset/
 iptv_player/packaging/macos/icon.icns
 iptv_player/.venv-build/
+vlc-help.txt

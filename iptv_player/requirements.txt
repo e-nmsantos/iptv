@@ -9,27 +9,20 @@ PySide6>=6.8.0,<6.9.0
 # Reprodução de vídeo (VLC)
 python-vlc>=3.0.18122
 
-# HTTP requests
+# HTTP requests (parsers, EPG, atualizações, cast)
 requests>=2.31.0
-aiohttp>=3.9.0
+# Usado diretamente em src/core/http_client.py (política de retries);
+# requests exige urllib3 < 3.
+urllib3>=2.0.0,<3
 
-# Processamento XML (EPG XMLTV)
-lxml>=4.9.0
-
-# Parsing M3U
-m3u8>=3.5.0
-
-# Async utilities
-aiofiles>=23.2.0
-
-# Criptografia (para Stalker Portal)
+# Criptografia (para Stalker Portal e assinatura de atualizações)
 pycryptodome>=3.20.0
+
+# Parsing XML seguro (EPG XMLTV, descrições UPnP)
+defusedxml>=0.7.1
 
 # Armazenamento seguro da chave de cifra no gestor de credenciais do sistema
 keyring>=25.0.0
-
-# Validação de URLs
-validators>=0.22.0
 
 # Transmissão para Chromecast e Smart TVs
 # Python 3.9/3.10 ficam nas últimas versões compatíveis (pychromecast 14 exige 3.11).

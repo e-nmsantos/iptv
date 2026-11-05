@@ -31,3 +31,22 @@ Os resultados ficam em `release\`. A workflow `Windows release` executa o
 mesmo processo para tags `v*` ou manualmente e adiciona proveniência Sigstore
 em repositórios públicos. A assinatura Authenticode continua a exigir um
 certificado privado de code signing.
+
+## Assinatura do manifesto de atualizações
+
+O manifesto é validado com SHA-256 do artefacto e, opcionalmente, com uma
+assinatura **Ed25519** verificada pela aplicação. Para ativar a verificação:
+
+```powershell
+# 1. Gerar o par de chaves (guardar a chave privada fora do repositório).
+python scripts\sign_manifest.py --generate release-key.pem
+
+# 2. Colar a chave pública impressa em config\__init__.py (RELEASE_PUBLIC_KEY).
+
+# 3. Assinar o manifesto antes de publicar.
+python scripts\sign_manifest.py --sign release-key.pem release\update-manifest.json
+```
+
+Com `RELEASE_PUBLIC_KEY` preenchida, a aplicação rejeita manifestos sem
+assinatura válida; sem ela, mantém-se o modelo HTTPS + SHA-256.
+
